@@ -230,8 +230,8 @@ Results will be updated as evaluation runs are completed.
 
 ## Development Timeline
 
-| Week | Dates           | Milestone                                             |
-| ---- | --------------- | ----------------------------------------------------- |
+| Week | Dates           | Milestone                                             | Date Completed |
+| ---- | --------------- | ----------------------------------------------------- | -------------- |
 | 1    | Feb 24 – Mar 2  | Environment setup, first 500 cases from CourtListener |
 | 2    | Mar 3 – Mar 9   | Full data ingestion, EyeCite parsing, edge list       |
 | 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                    |
