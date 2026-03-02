@@ -1,0 +1,131 @@
+# =============================================================
+# Verit — requirements.txt
+# Legal Citation Hallucination Detector
+# Python 3.11
+# =============================================================
+
+# -------------------------------------------------------------
+# NEO4J — Graph Database Driver
+# Connects Python to your Neo4j Docker container
+# Used in: db/neo4j_client.py, detector/connectivity_check.py
+# -------------------------------------------------------------
+neo4j==5.15.0
+
+# -------------------------------------------------------------
+# MILVUS — Vector Store
+# Milvus Lite runs embedded, no separate server needed
+# Used in: db/milvus_client.py, detector/relevance_check.py
+# -------------------------------------------------------------
+pymilvus==2.4.4
+
+# -------------------------------------------------------------
+# SENTENCE TRANSFORMERS — Embedding Model
+# Loads legal-bert-base-uncased from HuggingFace
+# Used in: embeddings/embed_pipeline.py
+# -------------------------------------------------------------
+sentence-transformers==3.0.1
+transformers==4.44.0
+torch==2.4.0
+
+# -------------------------------------------------------------
+# EYECITE — Legal Citation Extraction
+# Parses and resolves citation strings from raw opinion text
+# Used in: preprocessing/eyecite_parser.py
+# -------------------------------------------------------------
+eyecite==2.6.0
+
+# -------------------------------------------------------------
+# REQUESTS — HTTP Client
+# Calls the CourtListener REST API
+# Used in: data/fetch_cases.py
+# -------------------------------------------------------------
+requests==2.32.3
+
+# -------------------------------------------------------------
+# FASTAPI + UVICORN — API Layer
+# Exposes the /check-citation endpoint
+# Used in: api/main.py
+# -------------------------------------------------------------
+fastapi==0.112.0
+uvicorn==0.30.6
+pydantic==2.8.2
+
+# -------------------------------------------------------------
+# HUGGING FACE DATASETS — Benchmark Data
+# Loads CLERC and CaseHOLD datasets
+# Used in: data/hf_dataset_loader.py
+# -------------------------------------------------------------
+datasets==2.21.0
+huggingface-hub==0.24.6
+
+# -------------------------------------------------------------
+# PYTHON-DOTENV — Environment Variables
+# Loads your .env file (API tokens, credentials)
+# Used in: all scripts that need COURTLISTENER_TOKEN
+# -------------------------------------------------------------
+python-dotenv==1.0.1
+
+# -------------------------------------------------------------
+# TQDM — Progress Bars
+# Shows progress during long ingestion and embedding runs
+# Used in: data/fetch_cases.py, embeddings/embed_pipeline.py
+# -------------------------------------------------------------
+tqdm==4.66.5
+
+# -------------------------------------------------------------
+# NUMPY + PANDAS — Data Handling
+# Array operations for embeddings, dataframe ops for benchmark
+# Used in: embeddings/embed_pipeline.py, benchmark/evaluate.py
+# -------------------------------------------------------------
+numpy==1.26.4
+pandas==2.2.2
+
+# -------------------------------------------------------------
+# SCIKIT-LEARN — Evaluation Metrics
+# Computes precision, recall, F1, confusion matrix
+# Used in: benchmark/evaluate.py
+# -------------------------------------------------------------
+scikit-learn==1.5.1
+
+# -------------------------------------------------------------
+# MATPLOTLIB + SEABORN — Visualization
+# Generates precision/recall curves and tradeoff plots
+# Used in: benchmark/evaluate.py, results reporting
+# -------------------------------------------------------------
+matplotlib==3.9.2
+seaborn==0.13.2
+
+# -------------------------------------------------------------
+# NETWORKX — Graph Analysis (local, pre-Neo4j)
+# Used for exploratory graph analysis and validation
+# before loading into Neo4j
+# -------------------------------------------------------------
+networkx==3.3
+
+# -------------------------------------------------------------
+# SPACY — NLP Preprocessing
+# Sentence boundary detection for structure-aware chunking
+# Used in: preprocessing/text_cleaner.py
+# -------------------------------------------------------------
+spacy==3.7.6
+
+# -------------------------------------------------------------
+# BEAUTIFULSOUP4 + LXML — HTML Stripping
+# Removes HTML tags from raw CourtListener opinion text
+# Used in: preprocessing/text_cleaner.py
+# -------------------------------------------------------------
+beautifulsoup4==4.12.3
+lxml==5.3.0
+
+# -------------------------------------------------------------
+# HTTPX — Async HTTP Client
+# Used by FastAPI for async requests in the API layer
+# -------------------------------------------------------------
+httpx==0.27.2
+
+# -------------------------------------------------------------
+# PYTEST — Testing
+# Unit tests for detector checks and preprocessing pipeline
+# -------------------------------------------------------------
+pytest==8.3.2
+pytest-asyncio==0.23.8
