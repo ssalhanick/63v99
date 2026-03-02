@@ -232,7 +232,7 @@ Results will be updated as evaluation runs are completed.
 
 | Week | Dates           | Milestone                                             | Date Completed |
 | ---- | --------------- | ----------------------------------------------------- | -------------- |
-| 1    | Feb 24 – Mar 2  | Environment setup, first 500 cases from CourtListener |
+| 1    | Feb 24 – Mar 2  | Environment setup, first 500 cases from CourtListener | 3-2-26         |
 | 2    | Mar 3 – Mar 9   | Full data ingestion, EyeCite parsing, edge list       |
 | 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                    |
 | 4    | Mar 17 – Mar 23 | BERT embedding pipeline + Milvus indexing             |
