@@ -104,11 +104,23 @@ Verit/
 ├── docker-compose.yml          # Neo4j container config
 ├── requirements.txt
 ├── README.md
+├── tests/
+│   ├── __init__.py
+│   ├── test_data.py        ← replaces sanity_check.py and sanity_check2.py
+│   ├── test_db.py          ← will hold Neo4j and Milvus connection tests (Week 3)
+│   ├── test_detector.py    ← will hold hallucination detector tests (Week 6)
+│   └── conftest.py         ← shared test fixtures
 │
 ├── data/
-│   ├── fetch_cases.py          # CourtListener API ingestion (4th Amendment filter)
-│   ├── hf_dataset_loader.py    # CLERC + CaseHOLD loader
-│   └── raw/                    # Downloaded case JSON
+│   ├── fetch_cases.py              # CourtListener API ingestion (4th Amendment filter)
+│   ├── fetch_all_opinions.py       # Fetches full opinion text for each case
+│   ├── hf_dataset_loader.py        # Load CLERC + CaseHOLD
+│   ├── convert_to_parquet.py       # Converts enriched JSON → Parquet for downstream use
+│   ├── raw/                        # Raw JSON from CourtListener (not pushed to GitHub)
+│   │   ├── cases_sample.json       # Initial 500 case metadata
+│   │   └── cases_enriched.json     # Full text + citation URLs added
+│   └── processed/                  # Parquet files for pipeline consumption
+│       └── cases_enriched.parquet  # Final cleaned dataset used by all downstream scripts
 │
 ├── preprocessing/
 │   ├── text_cleaner.py         # HTML stripping, chunking, dedup
@@ -186,6 +198,40 @@ uvicorn api.main:app --reload
 
 ---
 
+## Restarting Project
+
+### 1. Navigate to the Verit folder
+
+```bash
+cd \2026\01_Spring\MIS6V99\Verit
+```
+
+### 2. Activate Virtual Environment
+
+```bash
+.venv/Scripts/activate
+```
+
+You should see (.venv) at the start of your terminal prompt. If you don't see it, nothing else will work correctly.
+
+### 3. Start Docker Desktop
+
+Open Docker Desktop from your Start menu and wait until the whale icon in the taskbar shows "Docker Desktop is running." This is required before Neo4j can start.
+
+### 4. Start Neo4j
+
+```bash
+docker-compose up -d
+```
+
+### 5. Verify It is Running
+
+```bash
+docker ps
+```
+
+---
+
 ## API Usage
 
 ```bash
@@ -233,7 +279,7 @@ Results will be updated as evaluation runs are completed.
 | Week | Dates           | Milestone                                             | Date Completed |
 | ---- | --------------- | ----------------------------------------------------- | -------------- |
 | 1    | Feb 24 – Mar 2  | Environment setup, first 500 cases from CourtListener | 3-2-26         |
-| 2    | Mar 3 – Mar 9   | Full data ingestion, EyeCite parsing, edge list       |
+| 2    | Mar 3 – Mar 9   | Full data ingestion, EyeCite parsing, edge list       | 3-4-26         |
 | 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                    |
 | 4    | Mar 17 – Mar 23 | BERT embedding pipeline + Milvus indexing             |
 | 5    | Mar 24 – Mar 30 | Semantic similarity retrieval layer                   |
@@ -256,6 +302,13 @@ This project focuses on **Fourth Amendment (Search & Seizure) federal case law**
 Cases are pulled across all federal circuits to capture the full citation network, with the 9th Circuit serving as the primary analytical anchor.
 
 ---
+
+## Notes
+
+- Added a parquet layer of ingestion to aid in computational size restrictions.
+- Added a test directory to aid in troubleshooting/debugging. This also uncovered that we're not pulling in all of the plain text opions. Which leads me to...
+- After running the test enriched cases full text test, we realized that more than half (274) of the opinions pulled did not have full text, but rather a download url to pull PDFs. The two options given were either incorporate a download/extract function in the pipeline or drop them completely and pull in newer cases that were more likely to be digitized. We went with the latter.
+- After reworking the import to include batches of after 2015, between 2010 and 2015 and before 2010, I realized that limiting the search params to just the 9th circuit was not good enough, so we expanded the query and dropped the court param.
 
 ## Acknowledgements
 
