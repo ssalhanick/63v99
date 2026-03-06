@@ -19,9 +19,9 @@ COURTLISTENER_BASE_URL = "https://www.courtlistener.com/api/rest/v4"
 
 # Landmark Fourth Amendment case IDs
 LANDMARK_IDS = [
-    "terry-v-ohio-1968",
-    "katz-v-united-states-1967",
-    "mapp-v-ohio-1961",
-    "united-states-v-leon-1984",
-    "illinois-v-gates-1983"
+    107729,   # Terry v. Ohio (1968)
+    107564,   # Katz v. United States (1967)
+    106285,   # Mapp v. Ohio (1961)
+    111262,   # United States v. Leon (1984)
+    110959,   # Illinois v. Gates (1983)
 ]
