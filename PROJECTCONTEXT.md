@@ -148,11 +148,13 @@ Verit/
 ├── embeddings/
 │   ├── __init__.py
 │   ├── prune_vectors.py          # Week 4 — filter low-quality embeddings before indexing
-│   ├── embed_cases.py            # Week 4 — generate 768-dim vectors via legal-bert (batched)
-│   ├── milvus_index.py           # Week 4 — bulk insert vectors into Milvus, build HNSW index
-│   └── bm25_index.py             # Week 5 — build BM25 sparse index over plain_text
+│   ├── embed_cases.py            # Week 4 — chunk, embed, mean-pool, L2-normalize, save to parquet
+│   ├── milvus_index.py           # Week 4 — bulk insert normalized vectors, build HNSW index
+│   └── bm25_index.py             # Week 5 — build BM25 sparse index over tokenized plain_text
 ├── preprocessing/
-│   └── __init__.py
+│   ├── __init__.py
+│   ├── clean_text.py             # Week 4 — strip headers/footers, normalize citations to [CITATION], fix encoding
+│   └── tokenize_bm25.py          # Week 5 — lowercase, remove stopwords, lemmatize for BM25 corpus
 ├── detector/
 │   ├── __init__.py
 │   ├── existence_check.py        # Week 6 — Layer 1: Neo4j node lookup
@@ -171,9 +173,50 @@ Verit/
     └── test_detector.py          # Empty — to be built in Week 6
 ```
 
----
+## Preprocessing Pipeline — Full Order
 
-## config.py Contents
+```
+raw plain_text (cases_enriched.parquet)
+  │
+  ├── [Week 4] preprocessing/clean_text.py
+  │     Strip court headers/footers, normalize citations → [CITATION] token,
+  │     fix encoding artifacts and excessive whitespace
+  │     Output: data/processed/cases_cleaned.parquet
+  │
+  ├── [Week 4] embeddings/prune_vectors.py
+  │     Drop cases with plain_text < MIN_TEXT_LENGTH or null
+  │     Truncate at MAX_TEXT_LENGTH before chunking
+  │     Output: filtered case_id list
+  │
+  ├── [Week 4] embeddings/embed_cases.py
+  │     Paragraph chunking (512 token ceiling, 1-paragraph overlap)
+  │     legal-bert inference in batches of 16-32
+  │     Mean-pool chunk embeddings → 768-dim vector per case
+  │     L2-normalize each vector (divide by L2 norm)
+  │     Output: data/processed/embeddings.parquet
+  │
+  ├── [Week 4] embeddings/milvus_index.py
+  │     Bulk insert all normalized vectors
+  │     Then build HNSW index (M=16, ef_construction=200)
+  │     Output: milvus_verit.db
+  │
+  ├── [Week 5] preprocessing/tokenize_bm25.py
+  │     Takes cases_cleaned.parquet as input
+  │     Lowercase, remove stopwords (preserve legal terms), lemmatize
+  │     Output: data/processed/cases_tokenized.parquet
+  │
+  ├── [Week 5] embeddings/bm25_index.py
+  │     Build BM25 sparse index from tokenized corpus
+  │     Output: data/processed/bm25_index.pkl
+  │
+  └── [Week 9] visualization/umap_viz.py
+        Load embeddings from embeddings.parquet
+        StandardScaler → zero mean, unit variance per dimension
+        UMAP reduction to 2D (n_neighbors=15, min_dist=0.1, metric='cosine')
+        Overlay: color by circuit, year, or hallucination label
+```
+
+---
 
 ```python
 import os
@@ -260,13 +303,25 @@ CACHE_MAX_SIZE        = 512    # max entries in LRU cache
 
 ---
 
-## Week 4 — BERT Embedding Pipeline + Vector Pruning + Milvus Indexing
+## Week 4 — Text Cleaning + BERT Embedding Pipeline + Milvus Indexing
 
 ### Goals
 
-Generate 768-dimensional embeddings for all 1,353 corpus cases using
-`legal-bert-base-uncased`, apply vector pruning to remove low-quality inputs,
-and index the result in Milvus Lite using an HNSW index for fast ANN search.
+Clean raw opinion text, generate L2-normalized 768-dimensional embeddings for all
+non-pruned corpus cases using `legal-bert-base-uncased`, and index the result in
+Milvus Lite using an HNSW index for fast ANN search.
+
+### Text Cleaning (`preprocessing/clean_text.py`)
+
+Run this before embedding. Legal opinions from CourtListener are noisy:
+
+- **Header/footer stripping** — remove court headers, docket numbers, attorney lists.
+  These are procedural, not doctrinal, and pull embeddings toward procedural similarity.
+- **Citation normalization** — replace citation strings like `Terry v. Ohio, 392 U.S. 1 (1968)`
+  with a `[CITATION]` token. Raw citations burn token budget and add noise.
+- **Encoding cleanup** — fix unicode artifacts, excessive newlines, OCR errors from
+  older PDF conversions common in pre-2015 opinions.
+- Output: `data/processed/cases_cleaned.parquet`
 
 ### Vector Pruning (`embeddings/prune_vectors.py`)
 
@@ -274,20 +329,23 @@ Before embedding, filter out cases that would produce unreliable vectors:
 
 - **Too short** — `plain_text` under `MIN_TEXT_LENGTH` characters (200). Very short
   opinions are often procedural orders with no substantive Fourth Amendment content.
-  These would cluster artificially close to each other in embedding space.
-- **Too long** — truncate at `MAX_TEXT_LENGTH` (50,000 characters) before passing
-  to BERT. legal-bert has a 512-token limit; long texts will be chunked or truncated.
+- **Too long** — truncate at `MAX_TEXT_LENGTH` (50,000 characters) before chunking.
 - **Missing text** — cases where `plain_text` is null or empty are dropped entirely.
 
-Pruning happens before embedding — pruned cases remain in Neo4j as nodes but are
-not indexed in Milvus.
+Pruned cases remain in Neo4j as nodes but are not indexed in Milvus.
 
 ### Embedding (`embeddings/embed_cases.py`)
 
+- Input: `cases_cleaned.parquet` (cleaned text)
 - Model: `nlpaueb/legal-bert-base-uncased` (768-dim, pretrained on legal corpora)
 - Chunking: structure-aware paragraph chunking with 1-paragraph overlap, 512-token ceiling
-- Strategy: mean-pool the token embeddings across chunks to produce one vector per case
-- Output: saved to `data/processed/embeddings.parquet` (case_id + 768-dim vector)
+- Strategy: mean-pool the token embeddings across chunks → one 768-dim vector per case
+- **L2 normalization:** divide each vector by its L2 norm before saving
+  (`vector = vector / np.linalg.norm(vector)`). Required for cosine similarity
+  to be equivalent to dot product in Milvus. Applied after mean-pooling, before
+  saving to parquet and before Milvus insertion.
+- Output: `data/processed/embeddings.parquet` (case_id + normalized 768-dim vector)
+- Save to parquet after each batch — crash recovery without restarting from scratch
 
 ### Milvus Indexing (`embeddings/milvus_index.py`)
 
@@ -298,23 +356,22 @@ not indexed in Milvus.
 - Metric: cosine similarity
 - Collection schema: `case_id` (int64) + `embedding` (float_vector, dim=768)
 - **Critical:** bulk insert all vectors first, then call `create_index` — Milvus builds
-  a better HNSW graph when it sees the full dataset at once. Never create index then
-  insert incrementally.
+  a better HNSW graph when it sees the full dataset at once.
 - Insert in batches of 500-1000 to avoid memory spikes.
 
-### Embedding Batching (`embeddings/embed_cases.py`)
+### Embedding Batching
 
 - Process cases through legal-bert in batches of 16-32 (larger batches hit memory limits)
 - Save embeddings to parquet after each batch — crash recovery without re-running from scratch
-- Mean-pool token embeddings across chunks to produce one 768-dim vector per case
 
 ### Scripts to Build
 
-| Script                        | Purpose                                                  |
-| ----------------------------- | -------------------------------------------------------- |
-| `embeddings/prune_vectors.py` | Filter corpus by text quality, output clean list         |
-| `embeddings/embed_cases.py`   | Generate embeddings in batches of 16-32, save to parquet |
-| `embeddings/milvus_index.py`  | Bulk insert into Milvus, then build HNSW index           |
+| Script                        | Purpose                                                   |
+| ----------------------------- | --------------------------------------------------------- |
+| `preprocessing/clean_text.py` | Strip headers, normalize citations, fix encoding          |
+| `embeddings/prune_vectors.py` | Filter corpus by text quality, output clean list          |
+| `embeddings/embed_cases.py`   | Chunk, embed in batches, mean-pool, L2-normalize, parquet |
+| `embeddings/milvus_index.py`  | Bulk insert normalized vectors, then build HNSW index     |
 
 ---
 
@@ -332,6 +389,16 @@ A hallucinated case like _"United States v. Johnson, 2019"_ might score moderate
 similarity (the surrounding legal context sounds Fourth Amendment) but score zero on BM25
 (the case name doesn't appear anywhere in the corpus). Hybrid search catches the gap that
 pure vector search misses.
+
+### BM25 Tokenization (`preprocessing/tokenize_bm25.py`)
+
+Run before building the BM25 index. Takes `cases_cleaned.parquet` as input:
+
+- Lowercase all text
+- Remove stopwords — but preserve legal terms that are meaningful in Fourth Amendment
+  context (`unreasonable`, `reasonable`, `warrant`, `probable`, `cause`, `seizure`)
+- Lemmatize — `searched` and `searching` map to the same token, improving BM25 recall
+- Output: `data/processed/cases_tokenized.parquet`
 
 ### BM25 Sparse Index (`embeddings/bm25_index.py`)
 
@@ -387,11 +454,12 @@ Useful filters: `court_id`, `year`, `stub == false` (never return stubs as candi
 
 ### Scripts to Build
 
-| Script                       | Purpose                                                     |
-| ---------------------------- | ----------------------------------------------------------- |
-| `embeddings/bm25_index.py`   | Build and serialize BM25 index over corpus plain_text       |
-| `detector/semantic_check.py` | Hybrid search: ANN + BM25 fused via RRF, with pre-filtering |
-| `detector/cache.py`          | TTLCache for query embeddings and ANN results               |
+| Script                           | Purpose                                                     |
+| -------------------------------- | ----------------------------------------------------------- |
+| `preprocessing/tokenize_bm25.py` | Lowercase, remove stopwords, lemmatize for BM25 corpus      |
+| `embeddings/bm25_index.py`       | Build and serialize BM25 index over tokenized plain_text    |
+| `detector/semantic_check.py`     | Hybrid search: ANN + BM25 fused via RRF, with pre-filtering |
+| `detector/cache.py`              | TTLCache for query embeddings and ANN results               |
 
 ---
 
@@ -416,10 +484,15 @@ Useful filters: `court_id`, `year`, `stub == false` (never return stubs as candi
 Visualize the embedding space to understand where hallucinated citations land relative
 to real ones, and show citation density distribution across the corpus.
 
-### UMAP Dimensionality Reduction
+### UMAP Dimensionality Reduction (`visualization/umap_viz.py`)
 
 Reduce 768-dim case embeddings to 2D using UMAP for visualization.
 
+- **StandardScaler first** — before UMAP, apply `sklearn.preprocessing.StandardScaler`
+  to zero-mean and unit-variance each of the 768 dimensions. UMAP is sensitive to
+  feature scale — without this, high-variance dimensions dominate the projection and
+  distort the 2D layout. Applied to the embedding matrix loaded from parquet, not
+  to the Milvus vectors.
 - **Why UMAP over PCA:** UMAP preserves local neighborhood structure better than PCA,
   which matters here — we want to see how semantically similar cases cluster together.
   PCA is a linear projection and tends to compress legal text embeddings into a single
@@ -478,6 +551,8 @@ with the corpus, hallucinated cases are isolated.
 - Landmark nodes are isolated in the graph (no CITES edges from corpus) — by design, not a bug
 - `test_landmarks_are_reachable` test is skipped — landmark connectivity not used in Layer 3
 - EyeCite parsing not yet implemented — currently using `opinions_cited` URLs from CourtListener API
+- `preprocessing/clean_text.py` not yet built — needed before Week 4 embedding can start
+- `preprocessing/tokenize_bm25.py` not yet built — needed before Week 5 BM25 index
 - BM25 index not yet built (Week 5)
 - `RRF_THRESHOLD` not yet defined in config — add after Week 5 hybrid search is implemented
 - Benchmark generation script not yet written (Week 7)
@@ -486,6 +561,7 @@ with the corpus, hallucinated cases are isolated.
 - `cachetools` not yet in requirements.txt — add before Week 6
 - `rank_bm25` not yet in requirements.txt — add before Week 5
 - `umap-learn` not yet in requirements.txt — add before Week 9
+- `nltk` or `spacy` not yet in requirements.txt — needed for lemmatization in Week 5
 
 ---
 
