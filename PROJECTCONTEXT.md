@@ -160,11 +160,17 @@ Verit/
 │   ├── existence_check.py        # Week 6 — Layer 1: Neo4j node lookup
 │   ├── semantic_check.py         # Week 6 — Layer 2: hybrid search (ANN + BM25 via RRF)
 │   ├── connectivity_check.py     # Week 6 — Layer 3: citation density scoring
+│   ├── pipeline.py               # Week 6 — orchestrate all three layers, return verdict
 │   └── cache.py                  # Week 6 — TTLCache for query embeddings + ANN results
 ├── api/
-│   └── __init__.py
+│   ├── __init__.py
+│   └── main.py                   # Week 6 — FastAPI /check-citation endpoint
 ├── benchmark/
-│   └── __init__.py
+│   ├── __init__.py
+│   ├── generate_benchmark.py     # Week 7 — build balanced real/hallucinated test set
+│   └── benchmark.json            # Week 7 — 50/50 real vs hallucinated citations (in .gitignore)
+├── visualization/
+│   └── umap_viz.py               # Week 9 — StandardScaler + UMAP + hallucination overlay
 └── tests/
     ├── __init__.py
     ├── conftest.py               # Fixtures: raw_cases, merged_cases
@@ -385,10 +391,22 @@ embedding caching. This becomes Layer 2 of the detector.
 
 ### Why Hybrid Search
 
-A hallucinated case like _"United States v. Johnson, 2019"_ might score moderate cosine
-similarity (the surrounding legal context sounds Fourth Amendment) but score zero on BM25
-(the case name doesn't appear anywhere in the corpus). Hybrid search catches the gap that
-pure vector search misses.
+BM25 improves **Layer 2 retrieval quality** — it finds better corpus candidates to compare
+against, not whether the cited case itself is real. A cited case name like _"Carpenter v.
+United States"_ may not be in your corpus, but the term `Carpenter` likely appears in
+corpus opinions that discuss it. BM25 catches that keyword signal that dense vector search
+can miss when the embedding space compresses semantically similar cases together.
+
+The distinction matters: BM25 scoring zero on a citation tells you nothing about whether
+that case is hallucinated — a real-but-out-of-corpus case and a fabricated case both score
+zero. The hallucination detection work is done by the three layers working together:
+
+- **Layer 1** — catches citations that don't exist anywhere in CourtListener
+- **Layer 2** — checks whether the context around the citation is semantically consistent
+  with real Fourth Amendment cases (hybrid search improves candidate retrieval here)
+- **Layer 3** — checks whether the cited case has any citation footprint in the network
+
+Hybrid search makes Layer 2 a better retriever. It does not replace Layers 1 or 3.
 
 ### BM25 Tokenization (`preprocessing/tokenize_bm25.py`)
 
@@ -463,6 +481,154 @@ Useful filters: `court_id`, `year`, `stub == false` (never return stubs as candi
 
 ---
 
+## Week 6 — Hallucination Detector + FastAPI Endpoint
+
+### Goals
+
+Wire the three detection layers into a unified pipeline and expose it via a FastAPI
+`/check-citation` endpoint. Each layer returns a score and a verdict; the pipeline
+combines them into a final `REAL | SUSPICIOUS | HALLUCINATED` label.
+
+### Layer 1 — Existence Check (`detector/existence_check.py`)
+
+```
+Input:  case_id (integer, extracted from citation string via EyeCite)
+Output: exists (bool)
+
+Steps:
+  1. Query Neo4j: MATCH (c:Case {id: $id}) RETURN c
+  2. Return True if node found, False otherwise
+  3. If False → immediate HALLUCINATED verdict, skip Layers 2 and 3
+```
+
+### Layer 2 — Semantic Check (`detector/semantic_check.py`)
+
+```
+Input:  citation string + surrounding context text
+Output: rrf_score (float), top_k_cases (list)
+
+Steps:
+  1. Check embedding cache (TTLCache keyed on hash(context_text))
+  2. If miss: embed context using legal-bert, store in cache
+  3. Run HNSW ANN search in Milvus (pre-filter: stub=false, top-k=5)
+  4. Run BM25 search over tokenized corpus
+  5. Fuse results via RRF → ranked list
+  6. Return top RRF score
+  7. Flag as SUSPICIOUS if score < RRF_THRESHOLD
+```
+
+### Layer 3 — Connectivity Check (`detector/connectivity_check.py`)
+
+```
+Input:  case_id
+Output: density_score (int), is_connected (bool)
+
+Steps:
+  1. Query Neo4j for shared citations between target and corpus:
+     MATCH (target:Case {id: $id})-[:CITES]->(shared)
+           <-[:CITES]-(corpus:Case {stub: false})
+     RETURN count(DISTINCT shared) AS density
+  2. Return density score
+  3. Flag as SUSPICIOUS if density < CITATION_DENSITY_THRESHOLD
+```
+
+### Pipeline (`detector/pipeline.py`)
+
+```
+Input:  citation string + surrounding context text
+Output: verdict (REAL | SUSPICIOUS | HALLUCINATED), scores dict
+
+Logic:
+  layer1 = existence_check(case_id)
+  if not layer1: return HALLUCINATED
+
+  layer2 = semantic_check(context)
+  layer3 = connectivity_check(case_id)
+
+  if layer2 and layer3: return REAL
+  if not layer2 and not layer3: return HALLUCINATED
+  return SUSPICIOUS  # one layer passed, one failed
+```
+
+### FastAPI Endpoint (`api/main.py`)
+
+```
+POST /check-citation
+Body: { "citation": "...", "context": "..." }
+Response: {
+    "verdict": "REAL | SUSPICIOUS | HALLUCINATED",
+    "existence": bool,
+    "semantic_score": float,
+    "density_score": int,
+    "top_matches": [...]
+}
+```
+
+### Scripts to Build
+
+| Script                           | Purpose                                               |
+| -------------------------------- | ----------------------------------------------------- |
+| `detector/existence_check.py`    | Layer 1 — Neo4j node lookup                           |
+| `detector/semantic_check.py`     | Layer 2 — hybrid ANN + BM25 search via RRF            |
+| `detector/connectivity_check.py` | Layer 3 — citation density score                      |
+| `detector/pipeline.py`           | Orchestrate all three layers, return verdict + scores |
+| `detector/cache.py`              | TTLCache for embeddings and ANN results               |
+| `api/main.py`                    | FastAPI endpoint, request/response models             |
+
+---
+
+## Week 7 — Benchmark Dataset Construction
+
+### Goals
+
+Build a balanced benchmark of real and hallucinated citations to evaluate the detector
+in Week 8. The benchmark is the ground truth for precision, recall, and F1 scoring.
+
+### Benchmark Design
+
+- **Size:** 200 citations total (tune up/down based on time)
+- **Split:** 50% real (100), 50% hallucinated (100)
+- **Hallucinated subtypes** (3 equal groups of ~33):
+  - **Type A — Fabricated entirely** — case name, year, and citation string invented
+  - **Type B — Real case, wrong details** — real case name with wrong year or court
+  - **Type C — Plausible but nonexistent** — realistic-sounding name in right style
+    (e.g., _"United States v. Torres, 9th Cir. 2019"_) that doesn't exist
+
+### Real Citation Sampling
+
+Sample from your corpus cases that have verified `opinions_cited` links, extract
+the citation string from `plain_text` using EyeCite, and confirm the cited case
+exists in Neo4j. Use stratified sampling across circuits and years to avoid bias.
+
+### Hallucinated Citation Generation
+
+- **Type A/C:** generate via Claude API with a prompt instructing it to invent
+  plausible-sounding Fourth Amendment citations
+- **Type B:** take real cases from corpus and corrupt year (+/- 2 years) or
+  swap the court ID
+
+### Output
+
+`benchmark/benchmark.json` — list of objects:
+
+```json
+{
+  "citation": "United States v. Torres, 923 F.3d 1027 (9th Cir. 2019)",
+  "context": "...surrounding paragraph text...",
+  "label": "REAL | HALLUCINATED",
+  "subtype": null | "A" | "B" | "C",
+  "case_id": 12345 | null
+}
+```
+
+### Scripts to Build
+
+| Script                            | Purpose                                            |
+| --------------------------------- | -------------------------------------------------- |
+| `benchmark/generate_benchmark.py` | Build balanced real/hallucinated benchmark dataset |
+
+---
+
 ## Week 8 — Evaluation + Threshold Tuning
 
 ### Thresholds to Tune (on validation set only — never test set)
@@ -527,9 +693,11 @@ with the corpus, hallucinated cases are isolated.
    by CourtListener opinion ID, so landmark-anchored k-hop connectivity is not viable.
    Instead, Layer 3 measures citation overlap: how many cases does the cited case share
    with known corpus cases? A hallucinated case has no footprint in the citation network.
-4. **Hybrid search via RRF** — pure vector search misses hallucinated cases with plausible
-   semantic context but zero keyword presence. BM25 + HNSW fused via RRF catches both.
-   RRF chosen over weighted sum because it requires no weight tuning and is robust by default.
+4. **Hybrid search via RRF** — pure vector search can miss relevant corpus cases when
+   distinctive legal terms (case names, doctrines) appear in corpus text but compress
+   poorly in embedding space. BM25 + HNSW fused via RRF improves Layer 2 candidate
+   retrieval quality. BM25 does not detect hallucinations directly — that is the job
+   of Layers 1 and 3. RRF chosen over weighted sum because it requires no weight tuning.
 5. **Metadata pre-filtering** — filter before ANN search, not after, to preserve recall.
    Post-filtering discards candidates before ranking and degrades results significantly.
 6. **Bulk insert then index** — Milvus HNSW quality degrades if index is built incrementally.

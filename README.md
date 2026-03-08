@@ -310,6 +310,168 @@ Cases are pulled across all federal circuits to capture the full citation networ
 - After running the test enriched cases full text test, we realized that more than half (274) of the opinions pulled did not have full text, but rather a download url to pull PDFs. The two options given were either incorporate a download/extract function in the pipeline or drop them completely and pull in newer cases that were more likely to be digitized. We went with the latter.
 - After reworking the import to include batches of after 2015, between 2010 and 2015 and before 2010, I realized that limiting the search params to just the 9th circuit was not good enough, so we expanded the query and dropped the court param.
 
+## Change Log
+
+A week-by-week record of implementation decisions, design choices, and technical
+tradeoffs made during the build. Intended as a reference for the final writeup.
+
+---
+
+### Week 1 — Feb 24 – Mar 2
+
+#### Environment Setup, Docker, Neo4j, First Cases
+
+**Completed**
+
+- Python 3.10 virtual environment configured
+- Docker Desktop installed; Neo4j 5.15 container (`verit_neo4j`) running via Docker Compose
+- CourtListener API access verified with token authentication
+- Initial case fetch: first batch of Fourth Amendment cases retrieved
+- `config.py` established as single source of truth for all paths and credentials
+
+**Decisions**
+
+- **Neo4j over a relational DB** — citation relationships are inherently a graph problem.
+  Traversal queries (k-hops, shared citations) are natural in Cypher and would require
+  complex self-joins in SQL.
+- **Docker Compose for Neo4j** — keeps the database portable and reproducible without
+  a local Neo4j installation. Bolt on 7687, browser on 7474.
+- **Parquet for processed data, JSON for raw** — JSON for API responses and debugging
+  (human-readable, easy to inspect); Parquet for all pipeline consumption (columnar,
+  fast reads, 10x smaller than JSON at this scale).
+
+---
+
+### Week 2 — Mar 3 – Mar 9
+
+#### Full Data Ingestion, Parquet Pipeline
+
+**Completed**
+
+- Full corpus fetch: 2,000 raw cases across two batches (post-2015 and 2010-2015)
+- Opinion text enrichment via `fetch_all_opinions.py` — retrieved full `plain_text`
+  for cases where available
+- Batch merge and deduplication via `merge_batches.py` — 1,353 unique cases
+- Converted to `cases_enriched.parquet` (20.23 MB) via `convert_to_parquet.py`
+- 13 passing data validation tests in `tests/test_data.py`
+
+**Decisions**
+
+- **Multi-circuit corpus (removed ca9-only filter)** — initial design targeted 9th
+  Circuit only, but plain text coverage was too sparse (~12% for pre-2015 cases).
+  Expanding to all federal circuits gave enough cases with usable opinion text.
+- **Post-2015 focus with 2010 floor** — pre-2015 cases have poor CourtListener plain
+  text coverage (~12% vs ~87% post-2015). Including 2010-2015 adds breadth while
+  keeping coverage acceptable. Cases before 2010 dropped entirely.
+- **Deduplication on case_id** — CourtListener returns overlapping results across
+  paginated batches. Deduplication on `case_id` (not `cluster_id`) produced 1,353
+  unique cases with no duplicate opinion text.
+- **`opinions_cited` URLs instead of EyeCite** — EyeCite parses citation strings
+  from raw text (e.g., `392 U.S. 1`) but CourtListener's API already returns structured
+  `opinions_cited` URLs pointing directly to cited opinion IDs. Using the API field
+  avoids regex parsing errors on OCR'd text and gives cleaner citation data. EyeCite
+  remains in the stack for benchmark construction in Week 7 where we need to extract
+  citations from raw AI-generated text.
+
+---
+
+### Week 3 — Mar 10 – Mar 16
+
+#### Neo4j Graph Build and Verification
+
+**Completed**
+
+- `db/verify_landmarks.py` — verified CourtListener opinion IDs for all 5 landmark cases
+- `db/graph_loader.py` — loaded full corpus into Neo4j as directed citation graph
+  (1,353 full nodes, 14,773 stub nodes, 30,806 CITES edges); batched writes (500/batch)
+  for performance; fully idempotent via MERGE
+- `db/fetch_landmarks.py` — fetched 5 landmark SCOTUS cases directly from CourtListener
+  and loaded as full nodes with `landmark: true`
+- 14 passing graph validation tests in `tests/test_db.py`
+
+**Decisions**
+
+- **Stub nodes for out-of-corpus citations** — cases cited by the corpus but not present
+  in the 2010-2025 dataset are stored as minimal stub nodes (`stub: true`, id only).
+  This preserves the citation edge rather than discarding it. Stubs are needed for
+  Layer 3 citation density scoring — a citation to a real-but-out-of-corpus case is
+  still a valid graph signal.
+- **MERGE everywhere (idempotent writes)** — all Neo4j writes use MERGE instead of
+  CREATE. The graph loader can be re-run safely after crashes or config changes without
+  duplicating nodes or edges.
+- **Batched writes (500/batch via UNWIND)** — initial implementation wrote one
+  transaction per citation edge (~3 cases/second). Switching to batched UNWIND
+  transactions reduced load time from ~15 minutes to under 2 minutes.
+- **Bulk insert then build HNSW index** — discovered during graph loader work that
+  Neo4j (and Milvus) index quality degrades when built incrementally. Established
+  pattern: insert all data first, then build indexes.
+- **Layer 3 redesign — citation density (Option B)** — original design used k-hop
+  paths from corpus cases to canonical landmark cases (Terry, Katz, Mapp, Leon, Gates)
+  as the connectivity signal. Investigation revealed the corpus does not cite these
+  landmarks by their CourtListener opinion IDs — the landmark nodes are isolated in
+  the graph with zero incoming edges from the corpus.
+  Two options considered:
+  - **Option A:** expand landmark set to cases actually cited by corpus (Coolidge,
+    Ornelas, etc.), enrich stubs to build multi-hop paths back to SCOTUS landmarks.
+    Preserves k-hop visualization but requires 1,000-5,000 additional API calls and
+    anchors are chosen empirically rather than doctrinally.
+  - **Option B:** replace landmark connectivity with citation density — measure how
+    many citation targets a cited case shares with known corpus cases. Zero additional
+    API calls. A hallucinated case has no footprint in the citation network regardless
+    of landmark proximity. Loses k-hop visualization but gains a more robust signal
+    and a citation density heatmap as an alternative visualization.
+    **Option B chosen** — cleaner implementation, no additional data fetching, defensible
+    signal, and compatible with the remaining timeline.
+- **Neo4j browser inaccessible on Windows/Docker** — browser at `localhost:7474`
+  failed to authenticate despite correct credentials. Root cause: WebSocket connection
+  issues between Neo4j Desktop/browser and a Docker-hosted instance on Windows.
+  Resolution: use `cypher-shell` via `docker exec` for all graph queries. Python Bolt
+  connection (`bolt://localhost:7687`) unaffected throughout.
+- **`test_landmarks_are_reachable` skipped** — this test asserts at least one landmark
+  is reachable via a direct CITES edge from the corpus. With Option B, landmark
+  reachability is no longer a requirement. Test kept in suite but marked
+  `@pytest.mark.skip` with documented rationale.
+
+---
+
+### Design Decisions Pending Implementation
+
+The following decisions were made during Weeks 1-3 planning and will be implemented
+in later weeks. Recorded here for traceability.
+
+**Hybrid search (Week 5)** — Layer 2 will use Reciprocal Rank Fusion (RRF) to combine
+dense HNSW vector search (Milvus) with sparse BM25 keyword search. RRF chosen over
+weighted sum because it requires no weight tuning and is robust by default. BM25
+improves candidate retrieval quality — it does not detect hallucinations directly.
+
+**Vector pruning (Week 4)** — cases with `plain_text` under 200 characters or null
+will be excluded from Milvus indexing. They remain in Neo4j as graph nodes. Short
+opinions are typically procedural orders with no substantive Fourth Amendment content
+and would produce noisy embeddings that cluster artificially.
+
+**L2 normalization (Week 4)** — all embeddings will be L2-normalized before storage
+in Milvus so cosine similarity is equivalent to dot product. Applied after mean-pooling,
+before parquet save.
+
+**Text cleaning before embedding (Week 4)** — court headers, attorney lists, and raw
+citation strings will be stripped/normalized before passing text to legal-bert. Raw
+citations replaced with `[CITATION]` token to reduce token budget waste and embedding
+noise.
+
+**UMAP over PCA for visualization (Week 9)** — UMAP preserves local neighborhood
+structure in the embedding space; PCA collapses legal text embeddings into a dense
+blob. StandardScaler applied before UMAP to prevent high-variance dimensions from
+dominating the 2D projection.
+
+**Balanced benchmark with 3 hallucination subtypes (Week 7)** — 50/50 real vs
+hallucinated, hallucinated split into: Type A (fully fabricated), Type B (real case,
+corrupted details), Type C (plausible but nonexistent). Three subtypes test different
+failure modes of the detector.
+
+**All thresholds tuned on validation set (Week 8)** — cosine similarity threshold,
+RRF threshold, and citation density threshold will all be tuned on a held-out validation
+split, never on the test set.
+
 ## Acknowledgements
 
 - [CourtListener](https://www.courtlistener.com) — Free Law Project
