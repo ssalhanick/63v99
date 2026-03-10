@@ -366,12 +366,15 @@ tradeoffs made during the build. Intended as a reference for the final writeup.
 - **Deduplication on case_id** — CourtListener returns overlapping results across
   paginated batches. Deduplication on `case_id` (not `cluster_id`) produced 1,353
   unique cases with no duplicate opinion text.
-- **`opinions_cited` URLs instead of EyeCite** — EyeCite parses citation strings
-  from raw text (e.g., `392 U.S. 1`) but CourtListener's API already returns structured
-  `opinions_cited` URLs pointing directly to cited opinion IDs. Using the API field
-  avoids regex parsing errors on OCR'd text and gives cleaner citation data. EyeCite
-  remains in the stack for benchmark construction in Week 7 where we need to extract
-  citations from raw AI-generated text.
+- **`opinions_cited` URLs instead of EyeCite for graph building** — EyeCite parses
+  citation strings from raw text (e.g., `392 U.S. 1`) but CourtListener's API already
+  returns structured `opinions_cited` URLs pointing directly to cited opinion IDs.
+  Using the API field for graph construction avoids regex parsing errors on OCR'd text
+  and gives cleaner, more reliable citation data.
+  EyeCite's role is scoped to two later stages: (1) **Week 6** — extracting citation
+  strings from raw AI-generated text at query time before passing to the three-layer
+  detector, and (2) **Week 7** — extracting real citation strings from corpus
+  `plain_text` to use as the "real" half of the benchmark dataset.
 
 ---
 
@@ -438,6 +441,14 @@ tradeoffs made during the build. Intended as a reference for the final writeup.
 
 The following decisions were made during Weeks 1-3 planning and will be implemented
 in later weeks. Recorded here for traceability.
+
+**EyeCite scoped to query time and benchmark (Weeks 6-7)** — EyeCite was originally
+listed as a Week 2 deliverable but was correctly deferred. Its role is: (1) at query
+time in Week 6, parse raw AI-generated text to extract citation strings and resolve
+them to CourtListener opinion IDs before the three-layer pipeline runs; (2) in Week 7,
+extract real citation strings from corpus `plain_text` for the benchmark's real
+citation sample. EyeCite is not used for graph construction — that uses CourtListener's
+structured `opinions_cited` API field.
 
 **Hybrid search (Week 5)** — Layer 2 will use Reciprocal Rank Fusion (RRF) to combine
 dense HNSW vector search (Milvus) with sparse BM25 keyword search. RRF chosen over

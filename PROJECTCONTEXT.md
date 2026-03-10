@@ -92,13 +92,13 @@ docker exec -it verit_neo4j cypher-shell -u neo4j -p "Verit2026!"
 
 ### Graph Stats (Week 3 final)
 
-| Metric           | Count  |
-| ---------------- | ------ |
-| Full Case nodes  | 1,358  |
-| Stub nodes       | 14,773 |
-| Total Case nodes | 16,131 |
-| CITES edges      | 30,806 |
-| Landmark nodes   | 5      |
+| Metric              | Count  |
+| ------------------- | ------ |
+| Full Case nodes     | 1,358  |
+| Stub nodes          | 14,773 |
+| Total Case nodes    | 16,131 |
+| CITES edges         | 30,806 |
+| Landmark nodes      | 5      |
 
 ### Landmark Anchor Cases
 
@@ -106,13 +106,13 @@ Loaded via `db/fetch_landmarks.py`. Present in graph as full nodes with `landmar
 These are isolated from the corpus citation network (corpus cases do not cite them by
 CourtListener opinion ID) — landmark connectivity is not used in Layer 3 (see design decisions).
 
-| Case                  | Year | CourtListener Opinion ID |
-| --------------------- | ---- | ------------------------ |
-| Terry v. Ohio         | 1968 | 107729                   |
-| Katz v. United States | 1967 | 107564                   |
-| Mapp v. Ohio          | 1961 | 106285                   |
-| United States v. Leon | 1984 | 111252                   |
-| Illinois v. Gates     | 1983 | 110930                   |
+| Case                      | Year | CourtListener Opinion ID |
+| ------------------------- | ---- | ------------------------ |
+| Terry v. Ohio             | 1968 | 107729                   |
+| Katz v. United States     | 1967 | 107564                   |
+| Mapp v. Ohio              | 1961 | 106285                   |
+| United States v. Leon     | 1984 | 111252                   |
+| Illinois v. Gates         | 1983 | 110930                   |
 
 ---
 
@@ -157,6 +157,7 @@ Verit/
 │   └── tokenize_bm25.py          # Week 5 — lowercase, remove stopwords, lemmatize for BM25 corpus
 ├── detector/
 │   ├── __init__.py
+│   ├── eyecite_parser.py         # Week 6 — extract citation strings from raw text via EyeCite
 │   ├── existence_check.py        # Week 6 — Layer 1: Neo4j node lookup
 │   ├── semantic_check.py         # Week 6 — Layer 2: hybrid search (ANN + BM25 via RRF)
 │   ├── connectivity_check.py     # Week 6 — Layer 3: citation density scoring
@@ -223,6 +224,8 @@ raw plain_text (cases_enriched.parquet)
 ```
 
 ---
+
+
 
 ```python
 import os
@@ -294,18 +297,18 @@ CACHE_MAX_SIZE        = 512    # max entries in LRU cache
 
 ## Timeline Status
 
-| Week | Dates           | Milestone                                         | Status      |
-| ---- | --------------- | ------------------------------------------------- | ----------- |
-| 1    | Feb 24 – Mar 2  | Environment setup, Docker, Neo4j, first cases     | ✅ Complete |
-| 2    | Mar 3 – Mar 9   | Full data ingestion, EyeCite parsing, Parquet     | ✅ Complete |
-| 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                | ✅ Complete |
-| 4    | Mar 17 – Mar 23 | BERT embedding pipeline + vector pruning + Milvus | 🔄 Up Next  |
-| 5    | Mar 24 – Mar 30 | ANN search + semantic retrieval layer             | ⬜ Upcoming |
-| 6    | Mar 31 – Apr 6  | Hallucination detector — all three checks         | ⬜ Upcoming |
-| 7    | Apr 7 – Apr 13  | Benchmark dataset construction                    | ⬜ Upcoming |
-| 8    | Apr 14 – Apr 20 | Evaluation — precision, recall, F1                | ⬜ Upcoming |
-| 9    | Apr 21 – Apr 27 | Error analysis + UMAP visualization               | ⬜ Upcoming |
-| 10   | Apr 28 – May 8  | Final writeup and submission                      | ⬜ Upcoming |
+| Week | Dates           | Milestone                                          | Status         |
+| ---- | --------------- | -------------------------------------------------- | -------------- |
+| 1    | Feb 24 – Mar 2  | Environment setup, Docker, Neo4j, first cases      | ✅ Complete    |
+| 2    | Mar 3 – Mar 9   | Full data ingestion, Parquet pipeline                      | ✅ Complete    |
+| 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                 | ✅ Complete    |
+| 4    | Mar 17 – Mar 23 | BERT embedding pipeline + vector pruning + Milvus  | 🔄 Up Next     |
+| 5    | Mar 24 – Mar 30 | ANN search + semantic retrieval layer              | ⬜ Upcoming    |
+| 6    | Mar 31 – Apr 6  | Hallucination detector — all three checks          | ⬜ Upcoming    |
+| 7    | Apr 7 – Apr 13  | Benchmark dataset construction                     | ⬜ Upcoming    |
+| 8    | Apr 14 – Apr 20 | Evaluation — precision, recall, F1                 | ⬜ Upcoming    |
+| 9    | Apr 21 – Apr 27 | Error analysis + UMAP visualization                | ⬜ Upcoming    |
+| 10   | Apr 28 – May 8  | Final writeup and submission                       | ⬜ Upcoming    |
 
 ---
 
@@ -372,12 +375,12 @@ Pruned cases remain in Neo4j as nodes but are not indexed in Milvus.
 
 ### Scripts to Build
 
-| Script                        | Purpose                                                   |
-| ----------------------------- | --------------------------------------------------------- |
-| `preprocessing/clean_text.py` | Strip headers, normalize citations, fix encoding          |
-| `embeddings/prune_vectors.py` | Filter corpus by text quality, output clean list          |
-| `embeddings/embed_cases.py`   | Chunk, embed in batches, mean-pool, L2-normalize, parquet |
-| `embeddings/milvus_index.py`  | Bulk insert normalized vectors, then build HNSW index     |
+| Script                           | Purpose                                                    |
+| -------------------------------- | ---------------------------------------------------------- |
+| `preprocessing/clean_text.py`    | Strip headers, normalize citations, fix encoding           |
+| `embeddings/prune_vectors.py`    | Filter corpus by text quality, output clean list           |
+| `embeddings/embed_cases.py`      | Chunk, embed in batches, mean-pool, L2-normalize, parquet  |
+| `embeddings/milvus_index.py`     | Bulk insert normalized vectors, then build HNSW index      |
 
 ---
 
@@ -392,8 +395,8 @@ embedding caching. This becomes Layer 2 of the detector.
 ### Why Hybrid Search
 
 BM25 improves **Layer 2 retrieval quality** — it finds better corpus candidates to compare
-against, not whether the cited case itself is real. A cited case name like _"Carpenter v.
-United States"_ may not be in your corpus, but the term `Carpenter` likely appears in
+against, not whether the cited case itself is real. A cited case name like *"Carpenter v.
+United States"* may not be in your corpus, but the term `Carpenter` likely appears in
 corpus opinions that discuss it. BM25 catches that keyword signal that dense vector search
 can miss when the embedding space compresses semantically similar cases together.
 
@@ -435,7 +438,6 @@ k = 60  (standard smoothing constant)
 ```
 
 Steps at query time:
-
 1. Embed context text using legal-bert → query vector
 2. Run HNSW ANN search in Milvus → top-k dense candidates
 3. Run BM25 keyword search → top-k sparse candidates
@@ -472,12 +474,12 @@ Useful filters: `court_id`, `year`, `stub == false` (never return stubs as candi
 
 ### Scripts to Build
 
-| Script                           | Purpose                                                     |
-| -------------------------------- | ----------------------------------------------------------- |
-| `preprocessing/tokenize_bm25.py` | Lowercase, remove stopwords, lemmatize for BM25 corpus      |
-| `embeddings/bm25_index.py`       | Build and serialize BM25 index over tokenized plain_text    |
-| `detector/semantic_check.py`     | Hybrid search: ANN + BM25 fused via RRF, with pre-filtering |
-| `detector/cache.py`              | TTLCache for query embeddings and ANN results               |
+| Script                            | Purpose                                                        |
+| --------------------------------- | -------------------------------------------------------------- |
+| `preprocessing/tokenize_bm25.py`  | Lowercase, remove stopwords, lemmatize for BM25 corpus         |
+| `embeddings/bm25_index.py`        | Build and serialize BM25 index over tokenized plain_text       |
+| `detector/semantic_check.py`      | Hybrid search: ANN + BM25 fused via RRF, with pre-filtering    |
+| `detector/cache.py`               | TTLCache for query embeddings and ANN results                  |
 
 ---
 
@@ -485,14 +487,34 @@ Useful filters: `court_id`, `year`, `stub == false` (never return stubs as candi
 
 ### Goals
 
-Wire the three detection layers into a unified pipeline and expose it via a FastAPI
+Wire the three detection layers into a unified pipeline, with EyeCite as the entry
+point for citation extraction from raw text. Expose the full pipeline via a FastAPI
 `/check-citation` endpoint. Each layer returns a score and a verdict; the pipeline
 combines them into a final `REAL | SUSPICIOUS | HALLUCINATED` label.
+
+### EyeCite Citation Extraction (`detector/eyecite_parser.py`)
+
+EyeCite is used at **query time** to extract structured citation objects from raw
+AI-generated text. This is distinct from the graph-building phase (Week 3) which used
+CourtListener's `opinions_cited` API field directly.
+
+```
+Input:  raw AI-generated paragraph text
+Output: list of extracted citations, each with:
+          - full citation string (e.g. "392 U.S. 1")
+          - reporter, volume, page
+          - CourtListener opinion ID (resolved via API lookup)
+
+Steps:
+  1. Run EyeCite over input text → list of FoundCitation objects
+  2. For each citation, query CourtListener /search/ to resolve to opinion ID
+  3. Pass (citation_string, opinion_id, context_text) to three-layer pipeline
+```
 
 ### Layer 1 — Existence Check (`detector/existence_check.py`)
 
 ```
-Input:  case_id (integer, extracted from citation string via EyeCite)
+Input:  case_id (integer, resolved from citation string via EyeCite + CourtListener lookup)
 Output: exists (bool)
 
 Steps:
@@ -535,45 +557,54 @@ Steps:
 ### Pipeline (`detector/pipeline.py`)
 
 ```
-Input:  citation string + surrounding context text
-Output: verdict (REAL | SUSPICIOUS | HALLUCINATED), scores dict
+Input:  raw AI-generated text
+Output: list of verdicts, one per extracted citation
 
-Logic:
-  layer1 = existence_check(case_id)
-  if not layer1: return HALLUCINATED
+Logic per citation:
+  citations = eyecite_parser(raw_text)   # extract + resolve to opinion IDs
 
-  layer2 = semantic_check(context)
-  layer3 = connectivity_check(case_id)
+  for each citation:
+    layer1 = existence_check(case_id)
+    if not layer1: verdict = HALLUCINATED; continue
 
-  if layer2 and layer3: return REAL
-  if not layer2 and not layer3: return HALLUCINATED
-  return SUSPICIOUS  # one layer passed, one failed
+    layer2 = semantic_check(context)
+    layer3 = connectivity_check(case_id)
+
+    if layer2 and layer3:     verdict = REAL
+    elif not layer2 and not layer3: verdict = HALLUCINATED
+    else:                     verdict = SUSPICIOUS
 ```
 
 ### FastAPI Endpoint (`api/main.py`)
 
 ```
 POST /check-citation
-Body: { "citation": "...", "context": "..." }
+Body: { "text": "...raw AI-generated paragraph..." }
 Response: {
-    "verdict": "REAL | SUSPICIOUS | HALLUCINATED",
-    "existence": bool,
-    "semantic_score": float,
-    "density_score": int,
-    "top_matches": [...]
+    "citations": [
+        {
+            "citation_string": "392 U.S. 1",
+            "verdict": "REAL | SUSPICIOUS | HALLUCINATED",
+            "existence": bool,
+            "semantic_score": float,
+            "density_score": int,
+            "top_matches": [...]
+        }
+    ]
 }
 ```
 
 ### Scripts to Build
 
-| Script                           | Purpose                                               |
-| -------------------------------- | ----------------------------------------------------- |
-| `detector/existence_check.py`    | Layer 1 — Neo4j node lookup                           |
-| `detector/semantic_check.py`     | Layer 2 — hybrid ANN + BM25 search via RRF            |
-| `detector/connectivity_check.py` | Layer 3 — citation density score                      |
-| `detector/pipeline.py`           | Orchestrate all three layers, return verdict + scores |
-| `detector/cache.py`              | TTLCache for embeddings and ANN results               |
-| `api/main.py`                    | FastAPI endpoint, request/response models             |
+| Script                           | Purpose                                                         |
+| -------------------------------- | --------------------------------------------------------------- |
+| `detector/eyecite_parser.py`     | Extract citations from raw text, resolve to CourtListener IDs   |
+| `detector/existence_check.py`    | Layer 1 — Neo4j node lookup                                     |
+| `detector/semantic_check.py`     | Layer 2 — hybrid ANN + BM25 search via RRF                      |
+| `detector/connectivity_check.py` | Layer 3 — citation density score                                |
+| `detector/pipeline.py`           | Orchestrate EyeCite + all three layers, return verdicts         |
+| `detector/cache.py`              | TTLCache for embeddings and ANN results                         |
+| `api/main.py`                    | FastAPI endpoint, request/response models                       |
 
 ---
 
@@ -592,13 +623,15 @@ in Week 8. The benchmark is the ground truth for precision, recall, and F1 scori
   - **Type A — Fabricated entirely** — case name, year, and citation string invented
   - **Type B — Real case, wrong details** — real case name with wrong year or court
   - **Type C — Plausible but nonexistent** — realistic-sounding name in right style
-    (e.g., _"United States v. Torres, 9th Cir. 2019"_) that doesn't exist
+    (e.g., *"United States v. Torres, 9th Cir. 2019"*) that doesn't exist
 
 ### Real Citation Sampling
 
-Sample from your corpus cases that have verified `opinions_cited` links, extract
-the citation string from `plain_text` using EyeCite, and confirm the cited case
-exists in Neo4j. Use stratified sampling across circuits and years to avoid bias.
+Sample corpus cases with verified `opinions_cited` links. Use EyeCite to extract
+the formatted citation string (e.g. `"392 U.S. 1"`) from `plain_text` — this gives
+you the citation in the format that would appear in AI-generated text, paired with
+a real surrounding context paragraph. Confirm the cited case exists in Neo4j before
+including. Use stratified sampling across circuits and years to avoid bias.
 
 ### Hallucinated Citation Generation
 
@@ -610,7 +643,6 @@ exists in Neo4j. Use stratified sampling across circuits and years to avoid bias
 ### Output
 
 `benchmark/benchmark.json` — list of objects:
-
 ```json
 {
   "citation": "United States v. Torres, 923 F.3d 1027 (9th Cir. 2019)",
@@ -623,9 +655,9 @@ exists in Neo4j. Use stratified sampling across circuits and years to avoid bias
 
 ### Scripts to Build
 
-| Script                            | Purpose                                            |
-| --------------------------------- | -------------------------------------------------- |
-| `benchmark/generate_benchmark.py` | Build balanced real/hallucinated benchmark dataset |
+| Script                            | Purpose                                              |
+| --------------------------------- | ---------------------------------------------------- |
+| `benchmark/generate_benchmark.py` | Build balanced real/hallucinated benchmark dataset   |
 
 ---
 
@@ -633,13 +665,13 @@ exists in Neo4j. Use stratified sampling across circuits and years to avoid bias
 
 ### Thresholds to Tune (on validation set only — never test set)
 
-| Parameter                | Config Key                   | Starting Value | What It Controls              |
-| ------------------------ | ---------------------------- | -------------- | ----------------------------- |
-| Cosine similarity floor  | `SIMILARITY_THRESHOLD`       | 0.75           | Layer 2 — pure vector signal  |
-| RRF score floor          | `RRF_THRESHOLD`              | TBD            | Layer 2 — hybrid signal       |
-| Citation density minimum | `CITATION_DENSITY_THRESHOLD` | 3              | Layer 3                       |
-| ANN top-k                | `TOP_K`                      | 5              | Candidates returned per query |
-| HNSW ef (query time)     | `HNSW_EF`                    | 50             | Recall vs speed tradeoff      |
+| Parameter                   | Config Key                    | Starting Value | What It Controls                    |
+| --------------------------- | ----------------------------- | -------------- | ------------------------------------ |
+| Cosine similarity floor     | `SIMILARITY_THRESHOLD`        | 0.75           | Layer 2 — pure vector signal         |
+| RRF score floor             | `RRF_THRESHOLD`               | TBD            | Layer 2 — hybrid signal              |
+| Citation density minimum    | `CITATION_DENSITY_THRESHOLD`  | 3              | Layer 3                              |
+| ANN top-k                   | `TOP_K`                       | 5              | Candidates returned per query        |
+| HNSW ef (query time)        | `HNSW_EF`                     | 50             | Recall vs speed tradeoff             |
 
 ---
 
@@ -676,12 +708,12 @@ with the corpus, hallucinated cases are isolated.
 
 ### Visualizations to Produce
 
-| Visualization                   | What It Shows                                           |
-| ------------------------------- | ------------------------------------------------------- |
-| UMAP of corpus embeddings       | How cases cluster semantically in 2D                    |
-| UMAP with hallucination overlay | Where fake citations land vs. real ones                 |
-| Citation density histogram      | Score distribution — real vs. hallucinated              |
-| Precision-recall curve          | Detector performance across thresholds (Layers 2 and 3) |
+| Visualization                  | What It Shows                                              |
+| ------------------------------ | ---------------------------------------------------------- |
+| UMAP of corpus embeddings      | How cases cluster semantically in 2D                       |
+| UMAP with hallucination overlay| Where fake citations land vs. real ones                    |
+| Citation density histogram     | Score distribution — real vs. hallucinated                 |
+| Precision-recall curve         | Detector performance across thresholds (Layers 2 and 3)   |
 
 ---
 
@@ -718,7 +750,8 @@ with the corpus, hallucinated cases are isolated.
 
 - Landmark nodes are isolated in the graph (no CITES edges from corpus) — by design, not a bug
 - `test_landmarks_are_reachable` test is skipped — landmark connectivity not used in Layer 3
-- EyeCite parsing not yet implemented — currently using `opinions_cited` URLs from CourtListener API
+- EyeCite scoped for Week 6 (query-time extraction) and Week 7 (benchmark real citation sampling) — not needed for graph building (uses CourtListener `opinions_cited` API field instead)
+- `eyecite` not yet in requirements.txt — add before Week 6
 - `preprocessing/clean_text.py` not yet built — needed before Week 4 embedding can start
 - `preprocessing/tokenize_bm25.py` not yet built — needed before Week 5 BM25 index
 - BM25 index not yet built (Week 5)
