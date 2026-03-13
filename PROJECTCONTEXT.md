@@ -21,24 +21,30 @@ connected using a three-layer detection pipeline:
 2. **Semantic relevance check** — is it relevant to the citing text? (Milvus ANN search + cosine similarity)
 3. **Graph connectivity check** — does it have citation density overlap with the corpus? (Neo4j)
 
+Results are surfaced through a Streamlit frontend powered by Claude Haiku, which explains
+verdicts in plain English and suggests corrections for hallucinated citations using
+retrieved corpus cases as RAG context.
+
 ---
 
 ## Tech Stack
 
-| Component                | Tool                    | Purpose                                              |
-| ------------------------ | ----------------------- | ---------------------------------------------------- |
-| Vector Store             | Milvus Lite 2.4+        | Store and search 768-dim case embeddings (HNSW)      |
-| Sparse Index             | BM25 (rank_bm25)        | Keyword search over plain_text for hybrid search     |
-| Hybrid Fusion            | Reciprocal Rank Fusion  | Merge dense + sparse results into single ranked list |
-| Graph Database           | Neo4j 5.15 (Docker)     | Store citation relationships as directed graph       |
-| Embedding Model          | legal-bert-base-uncased | Convert legal text to semantic vectors               |
-| Dimensionality Reduction | UMAP                    | 2D visualization of embedding space (Week 9)         |
-| Citation Extraction      | EyeCite                 | Parse citation strings from raw text                 |
-| API Layer                | FastAPI                 | Expose /check-citation endpoint                      |
-| Query Cache              | cachetools TTLCache     | Cache embeddings + ANN results at API layer          |
-| Infrastructure           | Docker + Docker Compose | Run Neo4j locally                                    |
-| Language                 | Python 3.10             |                                                      |
-| IDE                      | VS Code                 |                                                      |
+| Component                | Tool                         | Purpose                                              |
+| ------------------------ | ---------------------------- | ---------------------------------------------------- |
+| Vector Store             | Milvus Lite 2.4+             | Store and search 768-dim case embeddings (HNSW)      |
+| Sparse Index             | BM25 (rank_bm25)             | Keyword search over plain_text for hybrid search     |
+| Hybrid Fusion            | Reciprocal Rank Fusion       | Merge dense + sparse results into single ranked list |
+| Graph Database           | Neo4j 5.15 (Docker)          | Store citation relationships as directed graph       |
+| Embedding Model          | legal-bert-base-uncased      | Convert legal text to semantic vectors               |
+| Dimensionality Reduction | UMAP                         | 2D visualization of embedding space (Week 9)         |
+| Citation Extraction      | EyeCite                      | Parse citation strings from raw text                 |
+| API Layer                | FastAPI                      | Expose /check-citation endpoint                      |
+| Query Cache              | cachetools TTLCache          | Cache embeddings + ANN results at API layer          |
+| Frontend                 | Streamlit                    | User-facing UI for pasting and checking legal text   |
+| LLM                      | Claude Haiku (Anthropic API) | Explain verdicts, suggest corrections via RAG        |
+| Infrastructure           | Docker + Docker Compose      | Run Neo4j locally                                    |
+| Language                 | Python 3.10                  |                                                      |
+| IDE                      | VS Code                      |                                                      |
 
 ---
 
@@ -92,13 +98,13 @@ docker exec -it verit_neo4j cypher-shell -u neo4j -p "Verit2026!"
 
 ### Graph Stats (Week 3 final)
 
-| Metric              | Count  |
-| ------------------- | ------ |
-| Full Case nodes     | 1,358  |
-| Stub nodes          | 14,773 |
-| Total Case nodes    | 16,131 |
-| CITES edges         | 30,806 |
-| Landmark nodes      | 5      |
+| Metric           | Count  |
+| ---------------- | ------ |
+| Full Case nodes  | 1,358  |
+| Stub nodes       | 14,773 |
+| Total Case nodes | 16,131 |
+| CITES edges      | 30,806 |
+| Landmark nodes   | 5      |
 
 ### Landmark Anchor Cases
 
@@ -106,13 +112,13 @@ Loaded via `db/fetch_landmarks.py`. Present in graph as full nodes with `landmar
 These are isolated from the corpus citation network (corpus cases do not cite them by
 CourtListener opinion ID) — landmark connectivity is not used in Layer 3 (see design decisions).
 
-| Case                      | Year | CourtListener Opinion ID |
-| ------------------------- | ---- | ------------------------ |
-| Terry v. Ohio             | 1968 | 107729                   |
-| Katz v. United States     | 1967 | 107564                   |
-| Mapp v. Ohio              | 1961 | 106285                   |
-| United States v. Leon     | 1984 | 111252                   |
-| Illinois v. Gates         | 1983 | 110930                   |
+| Case                  | Year | CourtListener Opinion ID |
+| --------------------- | ---- | ------------------------ |
+| Terry v. Ohio         | 1968 | 107729                   |
+| Katz v. United States | 1967 | 107564                   |
+| Mapp v. Ohio          | 1961 | 106285                   |
+| United States v. Leon | 1984 | 111252                   |
+| Illinois v. Gates     | 1983 | 110930                   |
 
 ---
 
@@ -170,6 +176,10 @@ Verit/
 │   ├── __init__.py
 │   ├── generate_benchmark.py     # Week 7 — build balanced real/hallucinated test set
 │   └── benchmark.json            # Week 7 — 50/50 real vs hallucinated citations (in .gitignore)
+├── frontend/
+│   ├── __init__.py
+│   ├── app.py                    # Week 7/9 — Streamlit UI: input, verdict display, LLM explanations
+│   └── llm.py                    # Week 9 — Claude Haiku integration: explain verdicts, suggest corrections
 ├── visualization/
 │   └── umap_viz.py               # Week 9 — StandardScaler + UMAP + hallucination overlay
 └── tests/
@@ -225,7 +235,7 @@ raw plain_text (cases_enriched.parquet)
 
 ---
 
-
+## config.py
 
 ```python
 import os
@@ -249,6 +259,10 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 # CourtListener
 COURTLISTENER_TOKEN    = os.getenv("COURTLISTENER_TOKEN")
 COURTLISTENER_BASE_URL = "https://www.courtlistener.com/api/rest/v4"
+
+# Anthropic
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL   = "claude-haiku-4-5-20251001"   # Claude Haiku — LLM layer
 
 # Landmark Fourth Amendment anchor cases (CourtListener opinion IDs)
 # Verified and loaded into Neo4j via db/fetch_landmarks.py
@@ -297,18 +311,18 @@ CACHE_MAX_SIZE        = 512    # max entries in LRU cache
 
 ## Timeline Status
 
-| Week | Dates           | Milestone                                          | Status         |
-| ---- | --------------- | -------------------------------------------------- | -------------- |
-| 1    | Feb 24 – Mar 2  | Environment setup, Docker, Neo4j, first cases      | ✅ Complete    |
-| 2    | Mar 3 – Mar 9   | Full data ingestion, Parquet pipeline                      | ✅ Complete    |
-| 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                 | ✅ Complete    |
-| 4    | Mar 17 – Mar 23 | BERT embedding pipeline + vector pruning + Milvus  | 🔄 Up Next     |
-| 5    | Mar 24 – Mar 30 | ANN search + semantic retrieval layer              | ⬜ Upcoming    |
-| 6    | Mar 31 – Apr 6  | Hallucination detector — all three checks          | ⬜ Upcoming    |
-| 7    | Apr 7 – Apr 13  | Benchmark dataset construction                     | ⬜ Upcoming    |
-| 8    | Apr 14 – Apr 20 | Evaluation — precision, recall, F1                 | ⬜ Upcoming    |
-| 9    | Apr 21 – Apr 27 | Error analysis + UMAP visualization                | ⬜ Upcoming    |
-| 10   | Apr 28 – May 8  | Final writeup and submission                       | ⬜ Upcoming    |
+| Week | Dates           | Milestone                                                      | Status         |
+| ---- | --------------- | -------------------------------------------------------------- | -------------- |
+| 1    | Feb 24 – Mar 2  | Environment setup, Docker, Neo4j, first cases                  | ✅ Complete    |
+| 2    | Mar 3 – Mar 9   | Full data ingestion, Parquet pipeline                          | ✅ Complete    |
+| 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                             | ✅ Complete    |
+| 4    | Mar 17 – Mar 23 | BERT embedding pipeline + vector pruning + Milvus              | 🔄 In Progress |
+| 5    | Mar 24 – Mar 30 | ANN search + semantic retrieval layer                          | ⬜ Upcoming    |
+| 6    | Mar 31 – Apr 6  | Hallucination detector — all three checks                      | ⬜ Upcoming    |
+| 7    | Apr 7 – Apr 13  | Benchmark dataset construction + Streamlit app scaffold        | ⬜ Upcoming    |
+| 8    | Apr 14 – Apr 20 | Evaluation — precision, recall, F1 + threshold tuning          | ⬜ Upcoming    |
+| 9    | Apr 21 – Apr 27 | Error analysis + UMAP visualization + LLM integration (Haiku)  | ⬜ Upcoming    |
+| 10   | Apr 28 – May 8  | Frontend polish + citation graph visualization + final writeup | ⬜ Upcoming    |
 
 ---
 
@@ -355,6 +369,7 @@ Pruned cases remain in Neo4j as nodes but are not indexed in Milvus.
   saving to parquet and before Milvus insertion.
 - Output: `data/processed/embeddings.parquet` (case_id + normalized 768-dim vector)
 - Save to parquet after each batch — crash recovery without restarting from scratch
+- Run with `--resume` flag to skip already-embedded cases after a crash
 
 ### Milvus Indexing (`embeddings/milvus_index.py`)
 
@@ -367,20 +382,16 @@ Pruned cases remain in Neo4j as nodes but are not indexed in Milvus.
 - **Critical:** bulk insert all vectors first, then call `create_index` — Milvus builds
   a better HNSW graph when it sees the full dataset at once.
 - Insert in batches of 500-1000 to avoid memory spikes.
-
-### Embedding Batching
-
-- Process cases through legal-bert in batches of 16-32 (larger batches hit memory limits)
-- Save embeddings to parquet after each batch — crash recovery without re-running from scratch
+- Run with `--drop-existing` flag to rebuild from scratch.
 
 ### Scripts to Build
 
-| Script                           | Purpose                                                    |
-| -------------------------------- | ---------------------------------------------------------- |
-| `preprocessing/clean_text.py`    | Strip headers, normalize citations, fix encoding           |
-| `embeddings/prune_vectors.py`    | Filter corpus by text quality, output clean list           |
-| `embeddings/embed_cases.py`      | Chunk, embed in batches, mean-pool, L2-normalize, parquet  |
-| `embeddings/milvus_index.py`     | Bulk insert normalized vectors, then build HNSW index      |
+| Script                        | Purpose                                                   |
+| ----------------------------- | --------------------------------------------------------- |
+| `preprocessing/clean_text.py` | Strip headers, normalize citations, fix encoding          |
+| `embeddings/prune_vectors.py` | Filter corpus by text quality, output clean list          |
+| `embeddings/embed_cases.py`   | Chunk, embed in batches, mean-pool, L2-normalize, parquet |
+| `embeddings/milvus_index.py`  | Bulk insert normalized vectors, then build HNSW index     |
 
 ---
 
@@ -395,8 +406,8 @@ embedding caching. This becomes Layer 2 of the detector.
 ### Why Hybrid Search
 
 BM25 improves **Layer 2 retrieval quality** — it finds better corpus candidates to compare
-against, not whether the cited case itself is real. A cited case name like *"Carpenter v.
-United States"* may not be in your corpus, but the term `Carpenter` likely appears in
+against, not whether the cited case itself is real. A cited case name like _"Carpenter v.
+United States"_ may not be in your corpus, but the term `Carpenter` likely appears in
 corpus opinions that discuss it. BM25 catches that keyword signal that dense vector search
 can miss when the embedding space compresses semantically similar cases together.
 
@@ -438,6 +449,7 @@ k = 60  (standard smoothing constant)
 ```
 
 Steps at query time:
+
 1. Embed context text using legal-bert → query vector
 2. Run HNSW ANN search in Milvus → top-k dense candidates
 3. Run BM25 keyword search → top-k sparse candidates
@@ -474,12 +486,12 @@ Useful filters: `court_id`, `year`, `stub == false` (never return stubs as candi
 
 ### Scripts to Build
 
-| Script                            | Purpose                                                        |
-| --------------------------------- | -------------------------------------------------------------- |
-| `preprocessing/tokenize_bm25.py`  | Lowercase, remove stopwords, lemmatize for BM25 corpus         |
-| `embeddings/bm25_index.py`        | Build and serialize BM25 index over tokenized plain_text       |
-| `detector/semantic_check.py`      | Hybrid search: ANN + BM25 fused via RRF, with pre-filtering    |
-| `detector/cache.py`               | TTLCache for query embeddings and ANN results                  |
+| Script                           | Purpose                                                     |
+| -------------------------------- | ----------------------------------------------------------- |
+| `preprocessing/tokenize_bm25.py` | Lowercase, remove stopwords, lemmatize for BM25 corpus      |
+| `embeddings/bm25_index.py`       | Build and serialize BM25 index over tokenized plain_text    |
+| `detector/semantic_check.py`     | Hybrid search: ANN + BM25 fused via RRF, with pre-filtering |
+| `detector/cache.py`              | TTLCache for query embeddings and ANN results               |
 
 ---
 
@@ -570,9 +582,9 @@ Logic per citation:
     layer2 = semantic_check(context)
     layer3 = connectivity_check(case_id)
 
-    if layer2 and layer3:     verdict = REAL
+    if layer2 and layer3:           verdict = REAL
     elif not layer2 and not layer3: verdict = HALLUCINATED
-    else:                     verdict = SUSPICIOUS
+    else:                           verdict = SUSPICIOUS
 ```
 
 ### FastAPI Endpoint (`api/main.py`)
@@ -596,24 +608,25 @@ Response: {
 
 ### Scripts to Build
 
-| Script                           | Purpose                                                         |
-| -------------------------------- | --------------------------------------------------------------- |
-| `detector/eyecite_parser.py`     | Extract citations from raw text, resolve to CourtListener IDs   |
-| `detector/existence_check.py`    | Layer 1 — Neo4j node lookup                                     |
-| `detector/semantic_check.py`     | Layer 2 — hybrid ANN + BM25 search via RRF                      |
-| `detector/connectivity_check.py` | Layer 3 — citation density score                                |
-| `detector/pipeline.py`           | Orchestrate EyeCite + all three layers, return verdicts         |
-| `detector/cache.py`              | TTLCache for embeddings and ANN results                         |
-| `api/main.py`                    | FastAPI endpoint, request/response models                       |
+| Script                           | Purpose                                                       |
+| -------------------------------- | ------------------------------------------------------------- |
+| `detector/eyecite_parser.py`     | Extract citations from raw text, resolve to CourtListener IDs |
+| `detector/existence_check.py`    | Layer 1 — Neo4j node lookup                                   |
+| `detector/semantic_check.py`     | Layer 2 — hybrid ANN + BM25 search via RRF                    |
+| `detector/connectivity_check.py` | Layer 3 — citation density score                              |
+| `detector/pipeline.py`           | Orchestrate EyeCite + all three layers, return verdicts       |
+| `detector/cache.py`              | TTLCache for embeddings and ANN results                       |
+| `api/main.py`                    | FastAPI endpoint, request/response models                     |
 
 ---
 
-## Week 7 — Benchmark Dataset Construction
+## Week 7 — Benchmark Dataset Construction + Streamlit Scaffold
 
 ### Goals
 
 Build a balanced benchmark of real and hallucinated citations to evaluate the detector
-in Week 8. The benchmark is the ground truth for precision, recall, and F1 scoring.
+in Week 8. Stand up the Streamlit frontend with basic input and verdict display wired
+to the FastAPI backend.
 
 ### Benchmark Design
 
@@ -623,7 +636,7 @@ in Week 8. The benchmark is the ground truth for precision, recall, and F1 scori
   - **Type A — Fabricated entirely** — case name, year, and citation string invented
   - **Type B — Real case, wrong details** — real case name with wrong year or court
   - **Type C — Plausible but nonexistent** — realistic-sounding name in right style
-    (e.g., *"United States v. Torres, 9th Cir. 2019"*) that doesn't exist
+    (e.g., _"United States v. Torres, 9th Cir. 2019"_) that doesn't exist
 
 ### Real Citation Sampling
 
@@ -643,6 +656,7 @@ including. Use stratified sampling across circuits and years to avoid bias.
 ### Output
 
 `benchmark/benchmark.json` — list of objects:
+
 ```json
 {
   "citation": "United States v. Torres, 923 F.3d 1027 (9th Cir. 2019)",
@@ -653,11 +667,29 @@ including. Use stratified sampling across circuits and years to avoid bias.
 }
 ```
 
+### Streamlit App Scaffold (`frontend/app.py`)
+
+Stand up the frontend shell in Week 7 so it can be wired to the full pipeline.
+LLM explanations are added in Week 9 — the Week 7 version just displays raw verdicts.
+
+```
+UI layout:
+  - Text area: paste AI-generated legal text
+  - "Check Citations" button → POST to FastAPI /check-citation
+  - Results table: one row per citation
+      - Citation string
+      - Verdict badge (🟢 REAL / 🟡 SUSPICIOUS / 🔴 HALLUCINATED)
+      - Semantic score
+      - Density score
+  - Expandable detail per citation (top matches from corpus)
+```
+
 ### Scripts to Build
 
-| Script                            | Purpose                                              |
-| --------------------------------- | ---------------------------------------------------- |
-| `benchmark/generate_benchmark.py` | Build balanced real/hallucinated benchmark dataset   |
+| Script                            | Purpose                                             |
+| --------------------------------- | --------------------------------------------------- |
+| `benchmark/generate_benchmark.py` | Build balanced real/hallucinated benchmark dataset  |
+| `frontend/app.py`                 | Streamlit UI scaffold — verdict display, no LLM yet |
 
 ---
 
@@ -665,22 +697,23 @@ including. Use stratified sampling across circuits and years to avoid bias.
 
 ### Thresholds to Tune (on validation set only — never test set)
 
-| Parameter                   | Config Key                    | Starting Value | What It Controls                    |
-| --------------------------- | ----------------------------- | -------------- | ------------------------------------ |
-| Cosine similarity floor     | `SIMILARITY_THRESHOLD`        | 0.75           | Layer 2 — pure vector signal         |
-| RRF score floor             | `RRF_THRESHOLD`               | TBD            | Layer 2 — hybrid signal              |
-| Citation density minimum    | `CITATION_DENSITY_THRESHOLD`  | 3              | Layer 3                              |
-| ANN top-k                   | `TOP_K`                       | 5              | Candidates returned per query        |
-| HNSW ef (query time)        | `HNSW_EF`                     | 50             | Recall vs speed tradeoff             |
+| Parameter                | Config Key                   | Starting Value | What It Controls              |
+| ------------------------ | ---------------------------- | -------------- | ----------------------------- |
+| Cosine similarity floor  | `SIMILARITY_THRESHOLD`       | 0.75           | Layer 2 — pure vector signal  |
+| RRF score floor          | `RRF_THRESHOLD`              | TBD            | Layer 2 — hybrid signal       |
+| Citation density minimum | `CITATION_DENSITY_THRESHOLD` | 3              | Layer 3                       |
+| ANN top-k                | `TOP_K`                      | 5              | Candidates returned per query |
+| HNSW ef (query time)     | `HNSW_EF`                    | 50             | Recall vs speed tradeoff      |
 
 ---
 
-## Week 9 — Error Analysis + UMAP Visualization
+## Week 9 — Error Analysis + UMAP Visualization + LLM Integration
 
 ### Goals
 
 Visualize the embedding space to understand where hallucinated citations land relative
-to real ones, and show citation density distribution across the corpus.
+to real ones, show citation density distribution across the corpus, and wire Claude Haiku
+into the Streamlit frontend to explain verdicts and suggest corrections.
 
 ### UMAP Dimensionality Reduction (`visualization/umap_viz.py`)
 
@@ -708,12 +741,112 @@ with the corpus, hallucinated cases are isolated.
 
 ### Visualizations to Produce
 
-| Visualization                  | What It Shows                                              |
-| ------------------------------ | ---------------------------------------------------------- |
-| UMAP of corpus embeddings      | How cases cluster semantically in 2D                       |
-| UMAP with hallucination overlay| Where fake citations land vs. real ones                    |
-| Citation density histogram     | Score distribution — real vs. hallucinated                 |
-| Precision-recall curve         | Detector performance across thresholds (Layers 2 and 3)   |
+| Visualization                   | What It Shows                                           |
+| ------------------------------- | ------------------------------------------------------- |
+| UMAP of corpus embeddings       | How cases cluster semantically in 2D                    |
+| UMAP with hallucination overlay | Where fake citations land vs. real ones                 |
+| Citation density histogram      | Score distribution — real vs. hallucinated              |
+| Precision-recall curve          | Detector performance across thresholds (Layers 2 and 3) |
+
+### LLM Integration — Claude Haiku (`frontend/llm.py`)
+
+Claude Haiku is called after the three-layer pipeline returns verdicts. Retrieved corpus
+cases from Layer 2 (`top_matches`) are passed as RAG context so Haiku's explanations are
+grounded in the actual corpus, not just its training data.
+
+```
+Input:  citation_string, verdict, semantic_score, density_score, top_matches (list of corpus cases)
+Output: plain-English explanation + (if HALLUCINATED) suggested correction
+
+RAG pattern:
+  1. Layer 2 retrieves top-k corpus cases most similar to the citation context
+  2. Case names + excerpts passed to Haiku as context in the system prompt
+  3. Haiku explains why the citation is real/suspicious/hallucinated
+  4. If hallucinated, Haiku suggests the closest real case from top_matches
+
+Prompt structure:
+  System: "You are a legal citation verification assistant. The following are real
+           Fourth Amendment cases from the corpus: [top_matches]. Use them to explain
+           the verdict below and suggest a correction if needed."
+  User:   "Citation: [citation_string]. Verdict: [verdict]. Semantic score: [score].
+           Density score: [density]. Explain this verdict in plain English."
+```
+
+Haiku is called per-citation, not per-document, to keep latency and cost low.
+Results are streamed into the Streamlit UI using `st.write_stream`.
+
+### Scripts to Build
+
+| Script                      | Purpose                                                            |
+| --------------------------- | ------------------------------------------------------------------ |
+| `visualization/umap_viz.py` | StandardScaler + UMAP + hallucination overlay                      |
+| `frontend/llm.py`           | Claude Haiku integration — explain verdicts, suggest corrections   |
+| `frontend/app.py`           | Update Streamlit UI to display LLM explanations alongside verdicts |
+
+---
+
+## Week 10 — Frontend Polish + Citation Graph Visualization + Final Writeup
+
+### Goals
+
+Complete the Streamlit frontend with an interactive citation graph visualization that
+directly demonstrates the original project goal: find similar legal cases and visualize
+their citation relationships. Write up and submit the final report.
+
+### Interactive Citation Graph (`frontend/app.py`)
+
+When a user submits legal text and gets verdicts back, they can click any citation to
+open a graph visualization showing that case's neighborhood in the Neo4j citation network.
+
+```
+User flow:
+  1. User pastes AI-generated legal text → clicks "Check Citations"
+  2. Verdict table appears (REAL / SUSPICIOUS / HALLUCINATED per citation)
+  3. User clicks a citation row → graph panel expands below
+  4. Graph shows:
+       - The cited case as the center node
+       - Cases it cites (outbound CITES edges) — 1 hop out
+       - Cases that cite it (inbound CITES edges) — 1 hop in
+       - Corpus cases that share citations with it (Layer 3 neighbors)
+  5. Node color encodes verdict (green/yellow/red)
+  6. Node size encodes cite_count (more cited = larger)
+  7. Clicking a node in the graph loads that case's details in a sidebar
+```
+
+Library: **pyvis** (renders interactive HTML graph inside Streamlit via `st.components.v1.html`).
+Alternatively **streamlit-agraph** if pyvis layout is insufficient.
+
+Cypher query to fetch neighborhood for a given case_id:
+
+```cypher
+MATCH (target:Case {id: $id})-[r:CITES]-(neighbor)
+RETURN target, r, neighbor
+LIMIT 50
+```
+
+### Final Writeup Sections
+
+| Section                   | Content                                                       |
+| ------------------------- | ------------------------------------------------------------- |
+| Problem statement         | LLM hallucination in legal citation, stakes for practitioners |
+| System architecture       | Three-layer pipeline + RAG + frontend diagram                 |
+| Data                      | Corpus stats, Neo4j graph stats, preprocessing decisions      |
+| Methods                   | BERT embedding, HNSW, BM25, RRF, Neo4j connectivity           |
+| Evaluation                | Precision, recall, F1 on benchmark — per layer and combined   |
+| Visualization             | UMAP plots, citation density histograms, graph UI screenshots |
+| Limitations + future work | Corpus scope, threshold sensitivity, production scaling       |
+
+### New Dependencies to Add Before Week 10
+
+```
+pyvis
+```
+
+### Scripts to Build / Update
+
+| Script            | Purpose                                                     |
+| ----------------- | ----------------------------------------------------------- |
+| `frontend/app.py` | Add citation graph panel — pyvis neighborhood visualization |
 
 ---
 
@@ -743,6 +876,17 @@ with the corpus, hallucinated cases are isolated.
 12. **UMAP over PCA** — preserves local neighborhood structure in legal embedding space;
     PCA produces a dense blob, UMAP reveals substructure (warrant vs. stop-and-frisk cases)
 13. **All thresholds tuned on validation set** — never test set (Week 8)
+14. **RAG via top_matches** — Layer 2 top-k corpus cases passed as context to Claude Haiku.
+    Haiku explanations are grounded in retrieved corpus cases, not generated from training
+    data alone. This keeps explanations factually anchored to the actual corpus.
+15. **Haiku over Opus/Sonnet for LLM layer** — explanation and suggestion tasks don't require
+    the most powerful model. Haiku keeps latency and API cost minimal for per-citation calls.
+16. **Streamlit over React** — pure Python frontend, no separate Node.js project. Sufficient
+    for a grad project demo and integrates directly with the existing Python stack.
+17. **pyvis for citation graph** — renders interactive HTML graphs inside Streamlit via
+    `st.components.v1.html`. Directly fulfills the original project goal of visualizing
+    citation relationships. Graph is scoped to 1-hop neighborhood (50 node limit) to keep
+    rendering fast and readable.
 
 ---
 
@@ -752,7 +896,6 @@ with the corpus, hallucinated cases are isolated.
 - `test_landmarks_are_reachable` test is skipped — landmark connectivity not used in Layer 3
 - EyeCite scoped for Week 6 (query-time extraction) and Week 7 (benchmark real citation sampling) — not needed for graph building (uses CourtListener `opinions_cited` API field instead)
 - `eyecite` not yet in requirements.txt — add before Week 6
-- `preprocessing/clean_text.py` not yet built — needed before Week 4 embedding can start
 - `preprocessing/tokenize_bm25.py` not yet built — needed before Week 5 BM25 index
 - BM25 index not yet built (Week 5)
 - `RRF_THRESHOLD` not yet defined in config — add after Week 5 hybrid search is implemented
@@ -763,6 +906,10 @@ with the corpus, hallucinated cases are isolated.
 - `rank_bm25` not yet in requirements.txt — add before Week 5
 - `umap-learn` not yet in requirements.txt — add before Week 9
 - `nltk` or `spacy` not yet in requirements.txt — needed for lemmatization in Week 5
+- `streamlit` not yet in requirements.txt — add before Week 7
+- `anthropic` not yet in requirements.txt — add before Week 9
+- `ANTHROPIC_API_KEY` not yet in `.env` / `.env.example` — add before Week 9
+- `pyvis` not yet in requirements.txt — add before Week 10
 
 ---
 
