@@ -21,6 +21,8 @@ Flags:
   --resume   Skip cases whose case_id already exists in embeddings.parquet
 """
 
+import torch
+from transformers import AutoTokenizer, AutoModel
 import argparse
 import logging
 import time
@@ -28,8 +30,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-import torch
-from transformers import AutoTokenizer, AutoModel
+
+
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -47,7 +49,7 @@ OUTPUT_PATH = Path(PROCESSED_DIR) / "embeddings.parquet"
 # Tunable constants
 MAX_TOKENS       = 512     # legal-bert max sequence length
 CHUNK_OVERLAP    = 1       # paragraphs of overlap between consecutive chunks
-EMBED_BATCH_SIZE = 16      # cases per inference batch (reduce to 8 if OOM)
+EMBED_BATCH_SIZE = 32      # cases per inference batch (reduce to 8 if OOM)
 SAVE_EVERY       = 50      # write to parquet every N cases (crash recovery)
 
 # ---------------------------------------------------------------------------
@@ -197,7 +199,7 @@ def main(resume: bool = False) -> None:
 
     for idx, row in df.iterrows():
         case_id   = row["case_id"]
-        text      = row["plain_text"] or ""
+        text      = (row["plain_text"] or "")[:MAX_TEXT_LENGTH]
 
         paragraphs = _split_paragraphs(text)
         if not paragraphs:
