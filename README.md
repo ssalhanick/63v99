@@ -461,6 +461,49 @@ embeddings/milvus_index.py` — bulk inserted 1,353 normalized vectors, built HN
 - setuptools downgraded to 69.x — setuptools 82+ removed pkg_resources, which pymilvus 2.4.9 depends on at import time. Downgraded to setuptools==69.5.1 to restore pkg_resources availability.
 - `EMBED_BATCH_SIZE` set to 32 — default of 16 was conservative. CPU inference on legal-bert handles 32-chunk batches without memory issues and reduces per-case overhead.
 
+### Week 5 — Completed (Mar 18, 2026)
+
+#### Scripts Built
+
+- `preprocessing/tokenize_bm25.py` — spaCy lemmatization, legal term preservation,
+  outputs `data/processed/cases_tokenized.parquet` (case_id | tokens)
+- `embeddings/bm25_index.py` — BM25Okapi index over 1,353 tokenized cases,
+  outputs `data/processed/bm25_index.pkl` (5.7 MB)
+- `detector/semantic_check.py` — hybrid ANN (Milvus HNSW) + BM25 fused via RRF,
+  returns SemanticResult(rrf_score, is_relevant, top_matches)
+- `detector/cache.py` — TTLCache for query embeddings and ANN results
+  (maxsize=512, ttl=3600)
+
+#### Config Changes
+
+- `MILVUS_DB_PATH` removed, replaced with `MILVUS_URI = "http://localhost:19530"`
+
+#### Infrastructure
+
+- Milvus running in Docker standalone (port 19530), not Milvus Lite
+- `verit_milvus` container confirmed running with 1,353 vectors loaded
+- spaCy `en_core_web_sm` model installed
+- PyTorch reinstalled as CPU-only wheel to resolve Windows DLL initialization error
+
+#### Dependencies Added
+
+- `rank-bm25`
+- `spacy`
+- `torch` (CPU-only, reinstalled via `https://download.pytorch.org/whl/cpu`)
+
+#### Known Observations
+
+- RRF scores cluster in a narrow band (~0.023–0.025) by design — this is a
+  structural property of RRF with TOP_K=5 and RRF_K=60, not a bug
+- Layer 2 alone cannot separate real from hallucinated at query time — separation
+  comes from Layers 1 and 3 working together; Layer 2's role is retrieval quality
+- First sample in `cases_tokenized.parquet` shows residual court header tokens
+  (`supreme court state north dakota`) — clean_text.py did not fully strip this
+  case's header; low impact on BM25 quality due to IDF weighting, note for
+  Week 8 error analysis
+- `RRF_THRESHOLD = 0.02` set as placeholder in semantic_check.py — tune on
+  validation set in Week 8
+
 ---
 
 ### Design Decisions Pending Implementation

@@ -278,7 +278,8 @@ LANDMARK_IDS = [
 # Embedding
 EMBEDDING_MODEL   = "nlpaueb/legal-bert-base-uncased"
 EMBEDDING_DIM     = 768
-MILVUS_DB_PATH    = os.path.join(ROOT_DIR, "milvus_verit.db")
+MILVUS_URI        = "http://localhost:19530"
+# MILVUS_DB_PATH  = os.path.join(ROOT_DIR, "milvus_verit.db")
 MILVUS_COLLECTION = "case_embeddings"
 
 # Vector pruning thresholds (Week 4)
@@ -902,10 +903,7 @@ pyvis
 - Benchmark generation script not yet written (Week 7)
 - All thresholds (`SIMILARITY_THRESHOLD`, `RRF_THRESHOLD`, `CITATION_DENSITY_THRESHOLD`) not yet tuned (Week 8)
 - HNSW parameters (`M`, `ef_construction`, `ef`) may need tuning in Week 8
-- `cachetools` not yet in requirements.txt — add before Week 6
-- `rank_bm25` not yet in requirements.txt — add before Week 5
 - `umap-learn` not yet in requirements.txt — add before Week 9
-- `nltk` or `spacy` not yet in requirements.txt — needed for lemmatization in Week 5
 - `streamlit` not yet in requirements.txt — add before Week 7
 - `anthropic` not yet in requirements.txt — add before Week 9
 - `ANTHROPIC_API_KEY` not yet in `.env` / `.env.example` — add before Week 9
