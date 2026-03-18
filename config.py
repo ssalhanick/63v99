@@ -30,7 +30,8 @@ LANDMARK_IDS = [
 # Embedding
 EMBEDDING_MODEL   = "nlpaueb/legal-bert-base-uncased"
 EMBEDDING_DIM     = 768
-MILVUS_DB_PATH    = os.path.join(ROOT_DIR, "milvus_verit.db")
+MILVUS_URI        = "http://localhost:19530"
+# MILVUS_DB_PATH  = os.path.join(ROOT_DIR, "milvus_verit.db")
 MILVUS_COLLECTION = "case_embeddings"
 
 # Vector pruning thresholds (Week 4)
