@@ -29,7 +29,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import (
-    PROCESSED_DIR, MILVUS_DB_PATH, MILVUS_COLLECTION,
+    PROCESSED_DIR, MILVUS_URI, MILVUS_COLLECTION,
     EMBEDDING_DIM, HNSW_M, HNSW_EF_CONSTRUCTION, HNSW_EF,
 )
 
@@ -191,8 +191,8 @@ def main(drop_existing: bool = False) -> None:
         log.info(f"  L2 norm check passed: avg norm = {avg_norm:.4f}")
 
     # Connect
-    log.info(f"Connecting to Milvus Lite: {MILVUS_DB_PATH}")
-    client = MilvusClient(uri=str(MILVUS_DB_PATH))
+    log.info(f"Connecting to Milvus Lite: {MILVUS_URI}")
+    client = MilvusClient(uri=str(MILVUS_URI))
 
     _get_collection(client, drop_existing)
 
@@ -212,7 +212,7 @@ def main(drop_existing: bool = False) -> None:
 
     _build_index(client)
     _verify(client)
-    log.info(f"Done. Milvus DB → {MILVUS_DB_PATH}")
+    log.info(f"Done. Milvus DB → {MILVUS_URI}")
 
 
 if __name__ == "__main__":
