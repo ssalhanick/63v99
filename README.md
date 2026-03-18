@@ -435,6 +435,32 @@ tradeoffs made during the build. Intended as a reference for the final writeup.
   reachability is no longer a requirement. Test kept in suite but marked
   `@pytest.mark.skip` with documented rationale.
 
+### Week 4 — Mar 17 – Mar 23
+
+#### Text Cleaning + BERT Embedding Pipeline + Milvus Indexing
+
+##### Completed
+
+- `preprocessing/clean_text.py` — stripped court headers/footers, normalized citation strings to [CITATION] token, fixed encoding artifacts from PDF-converted opinions. Output: `data/processed/cases_cleaned.parquet`
+- `embeddings/prune_vectors.py` — filtered corpus to cases with usable plain text (min 200 chars, max 50,000 chars). Output: `data/processed/cases_pruned.parquet`
+- `embeddings/embed_cases.py` — paragraph chunking (512-token ceiling, 1-paragraph overlap), legal-bert inference, mean-pool + L2-normalize → 768-dim vector per case. Output: `data/processed/embeddings.parquet
+embeddings/milvus_index.py` — bulk inserted 1,353 normalized vectors, built HNSW index (M=16, ef_construction=200).
+- Milvus standalone stack added to Docker Compose (etcd, minio, milvus v2.4.9)
+- Dependencies frozen to requirements.txt
+
+##### Decisions
+
+- Milvus Docker standalone over Milvus Lite — milvus-lite has no Windows distribution. Switched to full Milvus standalone via Docker Compose with etcd and minio backing services. Connection updated from local `.db` file path to `http://localhost:19530`. No changes to index logic or collection schema required.
+- `torch` **import must precede numpy/pandas on Windows** — encountered WinError 1114 (DLL initialization failure on c10.dll) when numpy or pandas was imported before torch.
+  - Root cause: conflicting DLL load order on Windows.
+  - Fixed by moving import torch to the top of the imports block in embed_cases.py.
+  - Applied same ordering defensively to any future scripts that use both.
+- `MAX_TEXT_LENGTH` truncation applied before chunking — initial runs showed ETA of 180+ minutes because `MAX_TEXT_LENGTH` was defined in config but not enforced in the embedding loop. Added text = (row["plain_text"] or "")[:MAX_TEXT_LENGTH] before chunking. Corpus mean text length is 27,684 chars; truncation at 50,000 affects only the longest opinions and keeps chunks-per-case to a manageable range.
+- 50,000 char truncation preserves embedding quality — Fourth Amendment opinions front-load doctrinal reasoning. Tail content is typically procedural orders, attorney fee discussions, and appendices. Truncating at 50,000 chars keeps embeddings anchored to substantive legal reasoning and avoids mean-pool dilution from boilerplate.
+- `marshmallow` pinned to 3.x — pymilvus 2.4.9 depends on environs, which depends on marshmallow. Installing marshmallow 4.x (the current release) breaks environs with AttributeError: module 'marshmallow' has no attribute '**version_info**'. Pinned to marshmallow==3.23.2 via --force-reinstall.
+- setuptools downgraded to 69.x — setuptools 82+ removed pkg_resources, which pymilvus 2.4.9 depends on at import time. Downgraded to setuptools==69.5.1 to restore pkg_resources availability.
+- `EMBED_BATCH_SIZE` set to 32 — default of 16 was conservative. CPU inference on legal-bert handles 32-chunk batches without memory issues and reduces per-case overhead.
+
 ---
 
 ### Design Decisions Pending Implementation
