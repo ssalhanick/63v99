@@ -67,9 +67,10 @@ METADATA_COLS = ["case_id", "case_name", "court_id", "date_filed", "cite_count"]
 
 @dataclass
 class SemanticResult:
-    rrf_score:   float
-    is_relevant: bool
-    top_matches: list[dict] = field(default_factory=list)
+    rrf_score:        float
+    top_dense_score:  float   # cosine similarity of top dense hit (0.0–1.0)
+    is_relevant:      bool
+    top_matches:      list[dict] = field(default_factory=list)
     # top_matches entries:
     #   case_id, case_name, court_id, date_filed, cite_count,
     #   dense_score, bm25_score, rrf_score
@@ -350,16 +351,18 @@ def semantic_check(context_text: str, top_k: int = TOP_K) -> SemanticResult:
     fused = _rrf_fuse(dense_hits, sparse_hits)
 
     # 5. Top RRF score determines relevance
-    top_rrf_score = fused[0][1] if fused else 0.0
-    is_relevant   = top_rrf_score >= RRF_THRESHOLD
+    top_rrf_score   = fused[0][1] if fused else 0.0
+    top_dense_score = dense_hits[0][1] if dense_hits else 0.0
+    is_relevant     = top_rrf_score >= RRF_THRESHOLD
 
     # 6. Enrich top-k results with metadata
     top_matches = _enrich(fused, dense_hits, sparse_hits, top_k)
 
     return SemanticResult(
-        rrf_score   = top_rrf_score,
-        is_relevant = is_relevant,
-        top_matches = top_matches,
+        rrf_score       = top_rrf_score,
+        top_dense_score = top_dense_score,
+        is_relevant     = is_relevant,
+        top_matches     = top_matches,
     )
 
 
@@ -391,8 +394,9 @@ if __name__ == "__main__":
         print(f"Query type: {label}")
         print(f"Text: {query[:80]}...")
         result = semantic_check(query)
-        print(f"RRF score:   {result.rrf_score:.6f}")
-        print(f"Is relevant: {result.is_relevant}")
+        print(f"RRF score:    {result.rrf_score:.6f}")
+        print(f"Dense score:  {result.top_dense_score:.4f}")
+        print(f"Is relevant:  {result.is_relevant}")
         print(f"Top matches:")
         for i, m in enumerate(result.top_matches, 1):
             print(
