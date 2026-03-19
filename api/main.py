@@ -14,12 +14,20 @@ Example request:
     curl -X POST http://localhost:8000/check-citation \
          -H "Content-Type: application/json" \
          -d '{"text": "In Terry v. Ohio, 392 U.S. 1 (1968), the Court held..."}'
+
+Security notes:
+    - Input capped at MAX_TEXT_LENGTH (50,000 chars) to prevent runaway inference
+    - CORS restricted to Streamlit frontend origin (localhost:8501)
+    - No authentication — single-user local deployment
+    - Rate limiting not yet implemented — see PROJECT_CONTEXT.md for production roadmap
+      (recommended: slowapi + per-API-key limits when monetizing)
 """
 
 import logging
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from detector.pipeline import run_pipeline, CitationVerdict
@@ -27,10 +35,24 @@ from detector.pipeline import run_pipeline, CitationVerdict
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+# Maximum input size — prevents runaway legal-bert inference on oversized payloads
+MAX_TEXT_LENGTH = 50_000  # characters
+
 app = FastAPI(
     title="Verit — Legal Citation Hallucination Detector",
     description="Detects hallucinated citations in AI-generated legal text using a three-layer pipeline.",
     version="0.1.0",
+)
+
+# ---------------------------------------------------------------------------
+# CORS — restrict to Streamlit frontend origin
+# ---------------------------------------------------------------------------
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8501"],   # Streamlit default port
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -133,6 +155,12 @@ def check_citation(request: CheckCitationRequest):
     """
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="text field is empty")
+
+    if len(request.text) > MAX_TEXT_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"text exceeds {MAX_TEXT_LENGTH:,} character limit ({len(request.text):,} chars received)",
+        )
 
     logger.info("Received /check-citation request (%d chars)", len(request.text))
 
