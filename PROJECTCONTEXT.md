@@ -692,6 +692,33 @@ UI layout:
 | `benchmark/generate_benchmark.py` | Build balanced real/hallucinated benchmark dataset  |
 | `frontend/app.py`                 | Streamlit UI scaffold — verdict display, no LLM yet |
 
+### API Security
+
+#### Current State (Week 6)
+
+- **Input size limit:** requests exceeding 50,000 characters are rejected with HTTP 400.
+  Prevents runaway legal-bert inference on oversized payloads.
+- **CORS:** restricted to `http://localhost:8501` (Streamlit default port).
+- **No authentication:** single-user local deployment, no API keys required.
+- **No rate limiting:** not needed for local use.
+
+### Production / Monetization Roadmap
+
+If Verit is deployed as a commercial API, add these in order:
+
+1. **API key authentication** — issue keys per user/tier. FastAPI supports this
+   natively via `APIKeyHeader` dependency injection.
+
+2. **Per-key rate limiting** — use `slowapi` (wraps the `limits` library, integrates
+   cleanly with FastAPI). Typical SaaS tiers: free (10 req/min), pro (60 req/min),
+   enterprise (unlimited). Install with: `pip install slowapi`.
+
+3. **HTTPS** — terminate TLS at a reverse proxy (nginx or Caddy) in front of uvicorn.
+   Never expose uvicorn directly to the public internet.
+
+4. **Request logging** — log per-key usage to a database for billing and abuse detection.
+   FastAPI middleware makes this straightforward to add without touching endpoint logic.
+
 ---
 
 ## Week 8 — Evaluation + Threshold Tuning

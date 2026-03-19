@@ -504,6 +504,31 @@ embeddings/milvus_index.py` — bulk inserted 1,353 normalized vectors, built HN
 - `RRF_THRESHOLD = 0.02` set as placeholder in semantic_check.py — tune on
   validation set in Week 8
 
+### Week 6 — Hallucination Detector + FastAPI Endpoint
+
+_Mar 17 – Mar 23, 2026_
+
+#### Added
+
+- `detector/eyecite_parser.py` — extracts full case citations from raw text via EyeCite; resolves each to a CourtListener cluster ID via `POST /citation-lookup/`; returns `ResolvedCitation` objects with citation string, case name, case ID, and surrounding context window
+- `detector/existence_check.py` — Layer 1: Neo4j node lookup by cluster ID; short-circuits to HALLUCINATED if case not found
+- `detector/cache.py` — TTLCache for query embeddings and ANN results; keyed on text hash; avoids redundant legal-bert inference during benchmark evaluation loop
+- `detector/semantic_check.py` — Layer 2: hybrid ANN + BM25 search fused via Reciprocal Rank Fusion; returns RRF score, top dense cosine score, and top-k corpus matches
+- `detector/connectivity_check.py` — Layer 3: citation density score via Neo4j; counts distinct corpus cases sharing outbound citations with the target case
+- `detector/pipeline.py` — orchestrates EyeCite parser + all three layers; implements verdict logic (REAL / SUSPICIOUS / HALLUCINATED); returns `CitationVerdict` objects with full layer scores and top corpus matches for RAG
+- `api/main.py` — FastAPI service exposing `POST /check-citation` and `GET /health`; wraps pipeline with Pydantic request/response models
+
+#### Fixed
+
+- EyeCite field access updated to use `citation.groups` directly (was `citation.token.volume/reporter/page` which does not exist in installed version)
+- CourtListener resolution switched from `GET /search/` (BM25 text search, wrong results) to `POST /citation-lookup/` (exact citation match); cluster ID used directly as Neo4j node key, eliminating redundant opinion lookup call
+
+#### Notes
+
+- Landmark cases (Terry, Katz, Mapp, Leon, Gates) correctly return `density_score: 0` in Layer 3 — landmark isolation from corpus citation network is by design
+- `SemanticResult` exposes both `rrf_score` and `top_dense_score`; pipeline logs both for threshold tuning in Week 8
+- RRF threshold (`RRF_THRESHOLD = 0.02`) is a placeholder; full threshold tuning deferred to Week 8
+
 ---
 
 ### Design Decisions Pending Implementation
