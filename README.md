@@ -531,6 +531,16 @@ _Mar 17 – Mar 23, 2026_
 
 ---
 
+### API Security
+
+#### Current State (Week 6)
+
+- **Input size limit:** requests exceeding 50,000 characters are rejected with HTTP 400.
+  Prevents runaway legal-bert inference on oversized payloads.
+- **CORS:** restricted to `http://localhost:8501` (Streamlit default port).
+- **No authentication:** single-user local deployment, no API keys required.
+- **No rate limiting:** not needed for local use.
+
 ### Design Decisions Pending Implementation
 
 The following decisions were made during Weeks 1-3 planning and will be implemented

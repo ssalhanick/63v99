@@ -317,10 +317,10 @@ CACHE_MAX_SIZE        = 512    # max entries in LRU cache
 | 1    | Feb 24 – Mar 2  | Environment setup, Docker, Neo4j, first cases                  | ✅ Complete    |
 | 2    | Mar 3 – Mar 9   | Full data ingestion, Parquet pipeline                          | ✅ Complete    |
 | 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                             | ✅ Complete    |
-| 4    | Mar 17 – Mar 23 | BERT embedding pipeline + vector pruning + Milvus              | 🔄 In Progress |
-| 5    | Mar 24 – Mar 30 | ANN search + semantic retrieval layer                          | ⬜ Upcoming    |
-| 6    | Mar 31 – Apr 6  | Hallucination detector — all three checks                      | ⬜ Upcoming    |
-| 7    | Apr 7 – Apr 13  | Benchmark dataset construction + Streamlit app scaffold        | ⬜ Upcoming    |
+| 4    | Mar 17 – Mar 23 | BERT embedding pipeline + vector pruning + Milvus              | ✅ Complete    |
+| 5    | Mar 24 – Mar 30 | ANN search + semantic retrieval layer                          | ✅ Complete    |
+| 6    | Mar 31 – Apr 6  | Hallucination detector — all three checks                      | ✅ Complete    |
+| 7    | Apr 7 – Apr 13  | Benchmark dataset construction + Streamlit app scaffold        | 🔄 In Progress |
 | 8    | Apr 14 – Apr 20 | Evaluation — precision, recall, F1 + threshold tuning          | ⬜ Upcoming    |
 | 9    | Apr 21 – Apr 27 | Error analysis + UMAP visualization + LLM integration (Haiku)  | ⬜ Upcoming    |
 | 10   | Apr 28 – May 8  | Frontend polish + citation graph visualization + final writeup | ⬜ Upcoming    |
