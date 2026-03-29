@@ -312,18 +312,18 @@ CACHE_MAX_SIZE        = 512    # max entries in LRU cache
 
 ## Timeline Status
 
-| Week | Dates           | Milestone                                                      | Status         |
-| ---- | --------------- | -------------------------------------------------------------- | -------------- |
-| 1    | Feb 24 – Mar 2  | Environment setup, Docker, Neo4j, first cases                  | ✅ Complete    |
-| 2    | Mar 3 – Mar 9   | Full data ingestion, Parquet pipeline                          | ✅ Complete    |
-| 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                             | ✅ Complete    |
-| 4    | Mar 17 – Mar 23 | BERT embedding pipeline + vector pruning + Milvus              | ✅ Complete    |
-| 5    | Mar 24 – Mar 30 | ANN search + semantic retrieval layer                          | ✅ Complete    |
-| 6    | Mar 31 – Apr 6  | Hallucination detector — all three checks                      | ✅ Complete    |
-| 7    | Apr 7 – Apr 13  | Benchmark dataset construction + Streamlit app scaffold        | 🔄 In Progress |
-| 8    | Apr 14 – Apr 20 | Evaluation — precision, recall, F1 + threshold tuning          | ⬜ Upcoming    |
-| 9    | Apr 21 – Apr 27 | Error analysis + UMAP visualization + LLM integration (Haiku)  | ⬜ Upcoming    |
-| 10   | Apr 28 – May 8  | Frontend polish + citation graph visualization + final writeup | ⬜ Upcoming    |
+| Week | Dates           | Milestone                                                      | Status      |
+| ---- | --------------- | -------------------------------------------------------------- | ----------- |
+| 1    | Feb 24 – Mar 2  | Environment setup, Docker, Neo4j, first cases                  | ✅ Complete |
+| 2    | Mar 3 – Mar 9   | Full data ingestion, Parquet pipeline                          | ✅ Complete |
+| 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                             | ✅ Complete |
+| 4    | Mar 17 – Mar 23 | BERT embedding pipeline + vector pruning + Milvus              | ✅ Complete |
+| 5    | Mar 24 – Mar 30 | ANN search + semantic retrieval layer                          | ✅ Complete |
+| 6    | Mar 31 – Apr 6  | Hallucination detector — all three checks                      | ✅ Complete |
+| 7    | Apr 7 – Apr 13  | Benchmark dataset construction + Streamlit app scaffold        | ✅ Complete |
+| 8    | Apr 14 – Apr 20 | Evaluation — precision, recall, F1 + threshold tuning          | ⬜ Upcoming |
+| 9    | Apr 21 – Apr 27 | Error analysis + UMAP visualization + LLM integration (Haiku)  | ⬜ Upcoming |
+| 10   | Apr 28 – May 8  | Frontend polish + citation graph visualization + final writeup | ⬜ Upcoming |
 
 ---
 
@@ -927,13 +927,9 @@ pyvis
 - `preprocessing/tokenize_bm25.py` not yet built — needed before Week 5 BM25 index
 - BM25 index not yet built (Week 5)
 - `RRF_THRESHOLD` not yet defined in config — add after Week 5 hybrid search is implemented
-- Benchmark generation script not yet written (Week 7)
 - All thresholds (`SIMILARITY_THRESHOLD`, `RRF_THRESHOLD`, `CITATION_DENSITY_THRESHOLD`) not yet tuned (Week 8)
 - HNSW parameters (`M`, `ef_construction`, `ef`) may need tuning in Week 8
 - `umap-learn` not yet in requirements.txt — add before Week 9
-- `streamlit` not yet in requirements.txt — add before Week 7
-- `anthropic` not yet in requirements.txt — add before Week 9
-- `ANTHROPIC_API_KEY` not yet in `.env` / `.env.example` — add before Week 9
 - `pyvis` not yet in requirements.txt — add before Week 10
 
 ---

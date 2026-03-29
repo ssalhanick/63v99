@@ -7,6 +7,7 @@ load_dotenv()
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 RAW_DIR = f'{ROOT_DIR}/data/raw'
 PROCESSED_DIR = f'{ROOT_DIR}/data/processed'
+BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmark")
 
 # Neo4j
 NEO4J_URI      = os.getenv("NEO4J_URI")
@@ -26,6 +27,9 @@ LANDMARK_IDS = [
     110959,   # Illinois v. Gates (1983)
 ]
 
+# Anthropic
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL   = "claude-haiku-4-5-20251001"
 
 # Embedding
 EMBEDDING_MODEL   = "nlpaueb/legal-bert-base-uncased"
