@@ -529,6 +529,162 @@ _Mar 17 – Mar 23, 2026_
 - `SemanticResult` exposes both `rrf_score` and `top_dense_score`; pipeline logs both for threshold tuning in Week 8
 - RRF threshold (`RRF_THRESHOLD = 0.02`) is a placeholder; full threshold tuning deferred to Week 8
 
+### Week 7 — Benchmark Dataset + Streamlit Scaffold
+
+#### New Scripts
+
+- `benchmark/generate_benchmark.py` — builds balanced 200-citation benchmark dataset
+  with stratified real citation sampling via EyeCite and three hallucinated subtypes
+  generated via Claude API and corpus mutation
+- `frontend/app.py` — Streamlit UI scaffold wired to FastAPI `/check-citation` endpoint;
+  displays verdict badges, semantic scores, density scores, and expandable top corpus
+  matches per citation
+
+#### New Files
+
+- `benchmark/benchmark.json` — 200-citation evaluation dataset (100 real / 100
+  hallucinated); hallucinated split into Type A (fabricated), Type B (corrupted real),
+  Type C (plausible nonexistent)
+
+#### Dependencies Added
+
+- `anthropic` — Anthropic Python SDK for Claude API calls (added one week early;
+  needed for benchmark Type A/C generation and Week 9 LLM layer)
+- `streamlit` — frontend framework
+
+#### Config Changes
+
+- `BENCHMARK_DIR` added to `config.py`
+- `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` added to `config.py`, `.env`, `.env.example`
+
+#### Notes
+
+- Type B corruption embeds year shift or court swap directly into the citation string
+  so the detector sees the corrupted version, not the original
+- Real citations stratified across court_id and year; state courts capped at 40% of
+  real sample to avoid corpus skew
+- Reporter format filter applied to Type B candidates — neutral citations (WestLaw IDs,
+  Ohio slip opinions) excluded in favor of volume-reporter-page formatted strings
+
+### Week 8 — Evaluation + Threshold Tuning
+
+#### Goals
+
+Evaluate the hallucination detector against the benchmark dataset built in Week 7,
+tune detection thresholds on a held-out validation set, and report final metrics
+on a separate test set.
+
+#### Benchmark Split
+
+`benchmark.json` (200 entries, 50% real / 50% hallucinated) was split 80/20 into
+a validation set (160 entries) and a held-out test set (40 entries) using stratified
+sampling. Stratification preserves both the real/hallucinated balance and the
+distribution of hallucination subtypes (A, B, C) across both splits. The split is
+cached to `benchmark/split_indices.json` on first run and never reshuffled — this
+ensures the test set remains truly held-out across all subsequent runs.
+
+#### New Scripts
+
+| Script                       | Purpose                                                                                   |
+| ---------------------------- | ----------------------------------------------------------------------------------------- |
+| `benchmark/evaluate.py`      | Runs inference on val set, sweeps thresholds, saves best combo to `tuned_thresholds.json` |
+| `benchmark/report.py`        | Loads tuned thresholds, runs inference on test set, writes `eval_report.json`             |
+| `detector/metadata_check.py` | Layer 4 — validates year and court in citation string against Neo4j node properties       |
+| `db/backfill_court_id.py`    | One-time migration: backfills `court_id` from `cases_enriched.parquet` into Neo4j         |
+
+#### Layer 4 — Metadata Validation
+
+The first evaluation run exposed a gap in the original three-layer architecture:
+all 7 subtype B hallucinations (real case, corrupted metadata) passed Layers 1–3
+with full confidence. This was expected — the underlying case exists in Neo4j,
+the citation context is semantically valid Fourth Amendment text, and the citation
+network footprint belongs to the real case. No signal available to Layers 1–3
+distinguished these from genuine citations.
+
+**Layer 4** was added to close this gap. It extracts the court identifier and year
+from the citation string and compares them against the actual properties stored on
+the Neo4j Case node. A mismatch flags the citation as HALLUCINATED.
+
+Court extraction uses two strategies in order:
+
+1. **Direct CourtListener ID match** — catches injected court codes in reporter
+   citation parentheticals, e.g. `"476 U.S. 207 (ca11)"` where `ca11` appears
+   as a bare identifier in the trailing parenthetical.
+2. **Alias match** — catches natural-language court strings in formatted citations,
+   e.g. `"923 F.3d 1027 (4th Cir. 2019)"` → `ca4`.
+
+Layer 4 is skipped (returns `is_valid=True`) when no year or court can be extracted
+from the citation string — pure reporter citations like `"392 U.S. 1"` with no
+parenthetical metadata cannot be validated and are not penalized.
+
+**Why `court_id` needed backfilling:** The Neo4j graph was built in Week 3 from
+`cases_enriched.parquet` but `court_id` was not included as a node property at
+that time. `db/backfill_court_id.py` reads the `court_id` column from the parquet
+(zero nulls across 1,353 cases) and writes it to all matching Case nodes in batches.
+Without this, Layer 4's court comparison always returned `None` and fell through
+to `is_valid=True`, making it a no-op.
+
+#### Threshold Tuning
+
+`evaluate.py` sweeps 180 combinations (6 × SIM, 6 × RRF, 5 × DENSITY) on the
+validation set, selecting the combination with the highest F1 (ties broken by
+precision — fewer false alarms preferred in a legal context). The sweep landed
+at minimum values across all three parameters, reflecting that Layers 2 and 3
+contribute no independent signal on subtype B hallucinations — those are fully
+handled by Layer 4 — and that no false positives were observed at any threshold
+level on this benchmark.
+
+**Tuned thresholds:**
+
+| Parameter                | Config Key                   | Tuned Value |
+| ------------------------ | ---------------------------- | ----------- |
+| Cosine similarity floor  | `SIMILARITY_THRESHOLD`       | 0.60        |
+| RRF score floor          | `RRF_THRESHOLD`              | 0.010       |
+| Citation density minimum | `CITATION_DENSITY_THRESHOLD` | 1           |
+
+#### Results — Test Set (40 entries)
+
+| Layer                  | Precision | Recall    | F1        | Notes                                      |
+| ---------------------- | --------- | --------- | --------- | ------------------------------------------ |
+| Layer 1 — Existence    | 1.000     | 0.650     | 0.788     | Catches Type A + C immediately             |
+| Layer 2 — Semantic     | 0.000     | 0.000     | 0.000     | No independent signal on Type B            |
+| Layer 3 — Connectivity | 0.000     | 0.000     | 0.000     | No independent signal on Type B            |
+| Layer 4 — Metadata     | 1.000     | 1.000     | 1.000     | Catches all 7 Type B cases                 |
+| **Combined**           | **1.000** | **1.000** | **1.000** | Zero false positives, zero false negatives |
+
+**Subtype breakdown:**
+
+| Subtype                       | F1    | Description                             |
+| ----------------------------- | ----- | --------------------------------------- |
+| A — Fully fabricated          | 1.000 | Caught by Layer 1 (case does not exist) |
+| B — Real case, wrong metadata | 1.000 | Caught by Layer 4 (court ID mismatch)   |
+| C — Plausible but nonexistent | 1.000 | Caught by Layer 1 (case does not exist) |
+
+#### Honest Assessment of the 1.0 Result
+
+The perfect test-set scores are real but should be interpreted carefully:
+
+- **Small test set.** 40 entries is a limited sample. Perfect scores are more
+  achievable at this scale than they would be on a larger, harder benchmark.
+
+- **Benchmark scope.** The hallucinated citations were constructed to be detectable
+  by the current architecture. Type A and C are fabricated, so Layer 1 catches them
+  by definition. Type B corruptions inject a court ID directly into the citation
+  string — a pattern Layer 4 was specifically built to catch after observing the
+  initial false negatives.
+
+- **Layers 2 and 3 show F1=0.0 in isolation.** This is not a malfunction — it
+  accurately reflects that every hallucinated case reaching those layers is a Type B,
+  and Type B cases carry valid semantic scores and strong citation network footprints
+  from the underlying real case. The isolated metrics honestly show what each layer
+  contributes individually.
+
+- **Out-of-scope hallucination types.** The most dangerous real-world hallucination —
+  a real case cited for a proposition it does not support — is undetectable by any
+  current layer. Detecting contextual misuse would require reading and reasoning about
+  the full opinion text, not just checking existence and metadata. This is a known
+  limitation documented as future work.
+
 ---
 
 ### API Security

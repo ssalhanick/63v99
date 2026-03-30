@@ -53,6 +53,7 @@ SIMILARITY_THRESHOLD   = 0.75  # cosine similarity floor — tune on validation 
 
 # Hybrid search — Reciprocal Rank Fusion (Week 5)
 # RRF score = 1/(k + rank_dense) + 1/(k + rank_sparse)
+RRF_THRESHOLD = 0.02
 RRF_K                  = 60    # smoothing constant — standard default, rarely needs tuning
 BM25_INDEX_PATH        = os.path.join(PROCESSED_DIR, "bm25_index.pkl")
 
