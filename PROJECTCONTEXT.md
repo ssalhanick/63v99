@@ -720,18 +720,246 @@ If Verit is deployed as a commercial API, add these in order:
    FastAPI middleware makes this straightforward to add without touching endpoint logic.
 
 ---
-
-## Week 8 — Evaluation + Threshold Tuning
-
-### Thresholds to Tune (on validation set only — never test set)
-
-| Parameter                | Config Key                   | Starting Value | What It Controls              |
-| ------------------------ | ---------------------------- | -------------- | ----------------------------- |
-| Cosine similarity floor  | `SIMILARITY_THRESHOLD`       | 0.75           | Layer 2 — pure vector signal  |
-| RRF score floor          | `RRF_THRESHOLD`              | TBD            | Layer 2 — hybrid signal       |
-| Citation density minimum | `CITATION_DENSITY_THRESHOLD` | 3              | Layer 3                       |
-| ANN top-k                | `TOP_K`                      | 5              | Candidates returned per query |
-| HNSW ef (query time)     | `HNSW_EF`                    | 50             | Recall vs speed tradeoff      |
+# Week 8 — Evaluation + Threshold Tuning + Layer 4 + Benchmark Expansion
+ 
+## Goals
+ 
+Evaluate the detector against the benchmark, tune thresholds on a held-out validation
+set, add Layer 4 metadata validation to catch subtype B hallucinations, expand the
+benchmark to 500 entries, and run 10-fold cross-validation to verify score stability.
+ 
+---
+ 
+## Changes to Existing Files
+ 
+### Project Overview — updated
+ 
+The pipeline is now **four layers**, not three. Add Layer 4 to the What It Does list:
+ 
+> 4. **Metadata validation** — does the year and court in the citation string match the Neo4j node properties?
+ 
+### config.py — updated values
+ 
+```python
+SIMILARITY_THRESHOLD       = 0.60   # tuned in Week 8 (was 0.75)
+RRF_THRESHOLD              = 0.010  # added in Week 8
+CITATION_DENSITY_THRESHOLD = 1      # tuned in Week 8 (was 3)
+```
+ 
+### Neo4j status — updated
+ 
+`court_id` backfilled from `cases_enriched.parquet` into all Case nodes via
+`db/backfill_court_id.py`. After the backfill, 5 landmark nodes still had no
+`court_id` — landmarks are fetched via `db/fetch_landmarks.py` and are not
+present in the parquet file. All 5 are SCOTUS cases; patched manually with
+`court_id = 'scotus'`. `fetch_landmarks.py` now writes `court_id` directly
+during the upsert so this does not recur on graph rebuilds. `backfill_court_id.py`
+now runs a post-migration verification query and warns if any non-stub nodes
+still lack `court_id` after the batch run. Verified at zero after patch:
+ 
+```cypher
+MATCH (c:Case {stub: false}) WHERE c.court_id IS NULL RETURN count(c);
+// Returns 0
+```
+ 
+### Pipeline pseudocode — updated (`detector/pipeline.py`)
+ 
+Layer 4 now runs between Layer 1 and Layers 2/3:
+ 
+```
+layer1 = existence_check(case_id)
+if not layer1: verdict = HALLUCINATED; continue
+ 
+layer4 = metadata_check(case_id, citation_string)
+if layer4 fails: verdict = HALLUCINATED; continue
+ 
+layer2 = semantic_check(context)
+layer3 = connectivity_check(case_id)
+ 
+if layer2 and layer3:           verdict = REAL
+elif not layer2 and not layer3: verdict = HALLUCINATED
+else:                           verdict = SUSPICIOUS
+```
+ 
+---
+ 
+## New Scripts
+ 
+| Script | Purpose |
+|---|---|
+| `detector/metadata_check.py` | Layer 4 — validate year + court in citation string vs Neo4j node |
+| `db/backfill_court_id.py` | One-time migration: write court_id from parquet into Neo4j Case nodes |
+| `benchmark/evaluate.py` | Stratified 80/20 split, 180-combo threshold sweep on val set, saves `tuned_thresholds.json` |
+| `benchmark/report.py` | Final metrics on held-out test set, per-layer and combined, saves `eval_report.json` |
+| `benchmark/expand_benchmark.py` | Expand benchmark from 200 → 500 entries, weighted toward Type B |
+| `benchmark/cross_validate.py` | 10-fold stratified CV, mean ± std per metric, fold checkpointing, saves `cv_report.json` |
+ 
+### New files in `benchmark/`
+ 
+| File | Description |
+|---|---|
+| `tuned_thresholds.json` | Best thresholds from val sweep (in .gitignore) |
+| `eval_report.json` | Test-set metrics per layer and combined (in .gitignore) |
+| `cv_report.json` | Full cross-validation results with per-fold breakdown (in .gitignore) |
+| `split_indices.json` | Cached 80/20 split — never delete mid-project |
+| `cv_checkpoint.json` | Fold-level CV checkpoint — deleted on successful completion |
+ 
+---
+ 
+## Layer 4 — Metadata Validation (`detector/metadata_check.py`)
+ 
+Added after the first evaluation run showed all 7 subtype B hallucinations passing
+Layers 1–3 with full confidence. This was expected — a Type B citation uses a real
+`case_id`, so it exists in Neo4j, has a valid semantic footprint, and has strong citation
+density. Layers 1–3 have no signal to distinguish it from a genuine citation.
+ 
+Layer 4 extracts the court identifier and year from the citation string and compares
+them against the actual properties on the Neo4j Case node. A mismatch → HALLUCINATED.
+ 
+**Court extraction — two strategies, tried in order:**
+ 
+1. **Direct CourtListener ID match** — bare court_id in trailing parenthetical,
+   e.g. `"476 U.S. 207 (ca11)"` → extracts `ca11`. Catches the benchmark Type B
+   corruption format where a court_id was injected into the citation string.
+2. **Alias match** — natural-language court strings in formatted citations,
+   e.g. `"923 F.3d 1027 (4th Cir. 2019)"` → `ca4`.
+ 
+Layer 4 is skipped (`is_valid=True`, no penalty) when no year or court can be extracted
+from the citation string — pure reporter citations like `"392 U.S. 1"` have no
+parenthetical metadata and cannot be validated.
+ 
+**Why `court_id` needed backfilling:** The Neo4j graph was built in Week 3 without
+`court_id` as a node property. `db/backfill_court_id.py` reads `court_id` from
+`cases_enriched.parquet` (zero nulls across 1,353 cases) and writes it to all
+matching Case nodes in batches of 200. Without this, Layer 4's court comparison
+always returned `None` and fell through to `is_valid=True`, making it a no-op.
+ 
+---
+ 
+## Benchmark Expansion (`benchmark/expand_benchmark.py`)
+ 
+The original 200-entry benchmark produced F1=1.0 on 40 test entries — a real result
+but statistically weak at that sample size. The benchmark was expanded to 500 entries
+to reduce variance and stress-test the pipeline more rigorously.
+ 
+**Expansion targets (300 new entries):**
+ 
+| Type | Original | Added | Final | Notes |
+|---|---|---|---|---|
+| Real | 100 | 150 | 250 | Same stratified EyeCite sampling |
+| Type A | 33 | 40 | 73 | Fully fabricated via Claude API |
+| Type B | 34 | 70 | 104 | Weighted heavier — hardest subtype |
+| Type C | 33 | 40 | 73 | Plausible nonexistent via Claude API |
+| **Total** | **200** | **300** | **500** | |
+ 
+Type B expansion uses 60% court corruption / 40% year corruption (vs 50/50 in original)
+to stress Layer 4's court extraction path more aggressively.
+ 
+Expansion checkpoints saved to `benchmark/expand_checkpoint_*.json` during generation,
+deleted automatically on completion. Uses `random.seed(99)` (different from original
+`seed=42`) to ensure different samples are drawn.
+ 
+---
+ 
+## Threshold Tuning
+ 
+`evaluate.py` sweeps 180 combinations (6 × SIM, 6 × RRF, 5 × DENSITY) on the
+validation set (400 entries after 80/20 split on 500). Selects highest F1, ties
+broken by precision — fewer false alarms preferred in a legal context.
+ 
+The sweep landed at minimum values across all three parameters. This reflects that
+Layers 2 and 3 contribute no independent signal on Type B hallucinations (fully handled
+by Layer 4) and that no false positives were observed at any threshold level.
+ 
+**Tuned thresholds:**
+ 
+| Parameter | Config Key | Original | Tuned |
+|---|---|---|---|
+| Cosine similarity floor | `SIMILARITY_THRESHOLD` | 0.75 | 0.60 |
+| RRF score floor | `RRF_THRESHOLD` | — | 0.010 |
+| Citation density minimum | `CITATION_DENSITY_THRESHOLD` | 3 | 1 |
+ 
+---
+ 
+## Test Set Results (held-out 20% — 100 entries)
+ 
+| Layer | Precision | Recall | F1 | Notes |
+|---|---|---|---|---|
+| Layer 1 — Existence | 1.000 | 0.580 | 0.734 | Catches Type A + C immediately |
+| Layer 2 — Semantic | 0.000 | 0.000 | 0.000 | No independent signal on Type B |
+| Layer 3 — Connectivity | 0.000 | 0.000 | 0.000 | No independent signal on Type B |
+| Layer 4 — Metadata | 1.000 | 0.952 | 0.976 | 1 FN — corpus year data quality issue |
+| **Combined** | **1.000** | **0.980** | **0.990** | Zero FP, one FN (benchmark_id=171) |
+ 
+Subtype F1: A=1.000, B=0.976, C=1.000. Zero SUSPICIOUS verdicts. Zero false positives.
+ 
+**The one FN (benchmark_id=171):** Type B year-corrupted citation. The benchmark
+corrupted the year to `2025`; the Neo4j node for that case (`United States v. Moses,
+ca3`) also stores `year=2025` due to a corpus data quality issue. Layer 4 compares
+`2025 == 2025`, finds no mismatch, and passes it. This is undetectable at the
+Layer 4 level — the signal does not exist in the graph. Root cause: corpus year
+data quality, not a Layer 4 bug.
+ 
+---
+ 
+## 10-Fold Cross-Validation Results (full 500-entry benchmark)
+ 
+| Layer | Precision | Recall | F1 |
+|---|---|---|---|
+| Layer 1 — Existence | 1.000 ± 0.000 | 0.584 ± 0.020 | 0.737 ± 0.016 |
+| Layer 2 — Semantic | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| Layer 3 — Connectivity | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| Layer 4 — Metadata | 1.000 ± 0.000 | 0.874 ± 0.106 | 0.929 ± 0.062 |
+| **Combined** | **1.000 ± 0.000** | **0.944 ± 0.045** | **0.971 ± 0.024** |
+ 
+Fold F1 range: 0.936 – 1.000. No anomalous folds (threshold: drop > 0.05 below mean).
+ 
+**CV runtime note:** estimated ~125 min, actual ~12 min. The estimate was wrong —
+each entry is only evaluated once (in its test fold), not 10 times. Total inference
+calls = 500, not 5,000. Model and indexes stay loaded in memory across all folds.
+ 
+---
+ 
+## Honest Assessment of Evaluation Results
+ 
+### On the test-set F1 (0.990)
+ 
+The 0.990 on 100 held-out entries is genuine. One false negative exists (benchmark_id=171),
+a Type B year-corrupted citation where the Neo4j node stores the same wrong year the
+benchmark injected — a corpus data quality issue, not an architectural gap. All other
+hallucination subtypes were correctly classified:
+ 
+- Type A and C are fabricated → Layer 1 catches them by definition
+- Type B corruptions inject a court ID or wrong year into the citation string → Layer 4
+  catches them when the mismatch is detectable in the graph; the one FN is the
+  edge case where the graph itself carries the wrong value
+ 
+A benchmark of real cases cited for propositions they don't support (wrong legal context
+rather than wrong metadata) would not score 0.990 on any current layer.
+ 
+### On Layers 2 and 3 showing F1=0.0 in isolation
+ 
+This is not a malfunction. Every hallucinated case reaching Layers 2 and 3 is a Type B,
+and Type B cases carry valid semantic scores and strong citation network footprints from
+the underlying real case. The isolated metrics honestly show what each layer contributes
+individually. Layers 2 and 3 provide redundancy insurance for edge cases not covered by
+this benchmark — e.g. corpus cases that exist but were not indexed in Milvus, or cases
+with ambiguous CourtListener resolution.
+ 
+### On Layer 4 recall variance (±0.106 across folds)
+ 
+Some folds contain Type B entries that Layer 4 cannot catch — specifically year-corrupted
+citations where the Neo4j node carries the same (incorrect) year as the corrupted benchmark
+entry, or cases where the corrupted court happens to match the actual node's court_id.
+The test-set FN (benchmark_id=171) is a confirmed example of the former. This is the most
+meaningful signal from the CV results and the primary limitation to document in the writeup.
+ 
+### Out-of-scope hallucination types
+ 
+The most dangerous real-world hallucination — a real case cited for a proposition it does
+not support — is undetectable by any current layer. Detection would require reading and
+reasoning about the full opinion text, not just checking existence and metadata. This is
+the central limitation to address in the future work section of the writeup.
 
 ---
 
@@ -916,6 +1144,23 @@ pyvis
     citation relationships. Graph is scoped to 1-hop neighborhood (50 node limit) to keep
     rendering fast and readable.
 
+
+### Key Design Decisions Added in Week 8
+ 
+18. **Layer 4 added after first evaluation** — metadata validation catches Type B
+    hallucinations that pass Layers 1–3 with full confidence. Requires `court_id`
+    to be populated on Neo4j nodes — backfilled via `db/backfill_court_id.py`.
+ 
+19. **Benchmark expanded to 500** — original 200-entry benchmark produced statistically
+    weak 1.0 on 40 test entries. 300 new entries added, weighted toward Type B (70 new
+    vs 40 each for A and C). 10-fold CV on full 500 confirms F1=0.971 ± 0.024 is stable.
+ 
+20. **Citation normalization tradeoff documented** — `[CITATION]` token replacement in
+    `clean_text.py` improves BERT embedding quality but removes case name signal from
+    the BM25 index, which is built from cleaned text. BM25 keyword recall on case names
+    is reduced as a result. Known limitation, not a bug.
+ 
+
 ---
 
 ## Known Issues / Things to Watch
@@ -931,6 +1176,21 @@ pyvis
 - HNSW parameters (`M`, `ef_construction`, `ef`) may need tuning in Week 8
 - `umap-learn` not yet in requirements.txt — add before Week 9
 - `pyvis` not yet in requirements.txt — add before Week 10
+
+### Known Issues Added in Week 8
+ 
+- Layer 4 recall varies across CV folds (±0.106) — some Type B year corruptions are
+  undetectable when Neo4j node lacks a year property or the corrupted court matches real
+- **One test-set FN (benchmark_id=171)** — Type B year-corrupted citation where
+  `United States v. Moses (ca3)` has `year=2025` in Neo4j (incorrect); benchmark
+  corrupted year to `2025`. Layer 4 sees no mismatch and passes it. Corpus data
+  quality issue, not a Layer 4 bug. Undetectable without correcting the graph.
+- Landmark nodes were missing `court_id` after backfill — parquet does not include
+  landmark nodes (fetched separately). Patched manually to `court_id='scotus'`.
+  `fetch_landmarks.py` now writes `court_id` on upsert; `backfill_court_id.py` now
+  warns post-run if any non-stub nodes still lack `court_id`.
+- Layers 2 and 3 show F1=0.0 in isolation — expected by design, not a bug (see above)
+- Citation normalization reduces BM25 case-name signal — known tradeoff, documented
 
 ---
 

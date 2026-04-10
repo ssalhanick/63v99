@@ -47,11 +47,12 @@ def extract_year(date_str: str | None) -> int | None:
 def _upsert_landmark_node(tx, case_id: int, name: str, year: int | None, court: str):
     tx.run("""
         MERGE (c:Case {id: $case_id})
-        SET c.name     = $name,
-            c.year     = $year,
-            c.court    = $court,
-            c.stub     = false,
-            c.landmark = true
+        SET c.name      = $name,
+            c.year      = $year,
+            c.court     = $court,
+            c.court_id  = $court,
+            c.stub      = false,
+            c.landmark  = true
     """, case_id=case_id, name=name, year=year, court=court)
 
 

@@ -24,7 +24,7 @@ Existing tools like LexisNexis are research interfaces — they help lawyers _fi
 
 ## The Solution
 
-Verit runs every citation through a three-layer verification pipeline:
+Verit runs every citation through a **four-layer** verification pipeline:
 
 ```
 AI-Generated Legal Text
@@ -33,20 +33,24 @@ AI-Generated Legal Text
  EyeCite Extraction  →  Parse all citation strings from text
         │
         ▼
- Check 1: Neo4j      →  Does this case exist as a node in the graph?
+ Layer 1: Neo4j      →  Does this case exist as a node in the graph?
         │
         ▼
- Check 2: Milvus     →  Is it semantically relevant? (cosine similarity)
+ Layer 4: Neo4j      →  Do the year and court in the citation match the node?
         │
         ▼
- Check 3: Neo4j      →  Is it graph-connected to the legal topic?
+ Layer 2: Milvus     →  Is it semantically relevant? (hybrid ANN + BM25 via RRF)
         │
         ▼
- Verdict + Confidence Score
- { "verdict": "valid" | "real_irrelevant" | "hallucinated", "confidence": 0.0–1.0 }
+ Layer 3: Neo4j      →  Is it graph-connected to the legal topic?
+        │
+        ▼
+ Verdict + Scores
+ { "verdict": "REAL" | "SUSPICIOUS" | "HALLUCINATED",
+   "existence": bool, "semantic_score": float, "density_score": int }
 ```
 
-Each check catches what the others miss. A citation can pass the existence check and still be semantically irrelevant. A citation can score high on semantic similarity and still be disconnected from the citing document's legal doctrine in the real citation network. All three checks together produce a meaningfully more accurate verdict than any single check alone.
+Each layer catches what the others miss. A citation can pass the existence check and still be semantically irrelevant. A citation can score high on semantic similarity and still be disconnected from the citing document's legal doctrine in the real citation network. All four checks together produce a meaningfully more accurate verdict than any single check alone.
 
 ---
 
@@ -261,16 +265,33 @@ Content-Type: application/json
 
 ## Evaluation
 
-The benchmark compares three detection strategies across a labeled dataset of real and hallucinated citations:
+Benchmark: 500 citations, 50% real / 50% hallucinated, split 80/20 val/test with stratified
+sampling. Thresholds tuned on the 400-entry validation set; reported metrics are on the
+held-out 100-entry test set and 10-fold cross-validation over the full 500.
 
-| Strategy                          | Precision | Recall | F1  |
-| --------------------------------- | --------- | ------ | --- |
-| Existence check only (Neo4j)      | TBD       | TBD    | TBD |
-| Semantic similarity only (Milvus) | TBD       | TBD    | TBD |
-| Graph connectivity only (Neo4j)   | TBD       | TBD    | TBD |
-| **All three combined**            | TBD       | TBD    | TBD |
+### Test Set Results (held-out 100 entries)
 
-Results will be updated as evaluation runs are completed.
+| Layer                  | Precision | Recall | F1    |
+| ---------------------- | --------- | ------ | ----- |
+| Layer 1 — Existence    | 1.000     | 0.580  | 0.734 |
+| Layer 2 — Semantic     | 0.000     | 0.000  | 0.000 |
+| Layer 3 — Connectivity | 0.000     | 0.000  | 0.000 |
+| Layer 4 — Metadata     | 1.000     | 0.952  | 0.976 |
+| **Combined**           | **1.000** | **0.980** | **0.990** |
+
+Subtype F1: A=1.000, B=0.976, C=1.000. Zero false positives. One FN (benchmark_id=171): Type B year-corrupted citation where the Neo4j node stores the same incorrect year the benchmark injected — corpus data quality issue, undetectable by Layer 4.
+
+### 10-Fold Cross-Validation (500 entries)
+
+| Layer                  | Precision         | Recall            | F1                |
+| ---------------------- | ----------------- | ----------------- | ----------------- |
+| Layer 1 — Existence    | 1.000 ± 0.000     | 0.584 ± 0.020     | 0.737 ± 0.016     |
+| Layer 2 — Semantic     | 0.000 ± 0.000     | 0.000 ± 0.000     | 0.000 ± 0.000     |
+| Layer 3 — Connectivity | 0.000 ± 0.000     | 0.000 ± 0.000     | 0.000 ± 0.000     |
+| Layer 4 — Metadata     | 1.000 ± 0.000     | 0.874 ± 0.106     | 0.929 ± 0.062     |
+| **Combined**           | **1.000 ± 0.000** | **0.944 ± 0.045** | **0.971 ± 0.024** |
+
+Fold F1 range: 0.936 – 1.000. No anomalous folds. Zero false positives across all folds.
 
 ---
 
@@ -280,14 +301,14 @@ Results will be updated as evaluation runs are completed.
 | ---- | --------------- | ----------------------------------------------------- | -------------- |
 | 1    | Feb 24 – Mar 2  | Environment setup, first 500 cases from CourtListener | 3-2-26         |
 | 2    | Mar 3 – Mar 9   | Full data ingestion, EyeCite parsing, edge list       | 3-4-26         |
-| 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                    |
-| 4    | Mar 17 – Mar 23 | BERT embedding pipeline + Milvus indexing             |
-| 5    | Mar 24 – Mar 30 | Semantic similarity retrieval layer                   |
-| 6    | Mar 31 – Apr 6  | Hallucination detector — all three checks             |
-| 7    | Apr 7 – Apr 13  | Benchmark dataset construction                        |
-| 8    | Apr 14 – Apr 20 | Evaluation — precision, recall, F1, tradeoff curves   |
-| 9    | Apr 21 – Apr 27 | Error analysis + citation graph visualization         |
-| 10   | Apr 28 – May 8  | Final writeup and submission                          |
+| 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                    | 3-16-26        |
+| 4    | Mar 17 – Mar 23 | BERT embedding pipeline + Milvus indexing             | 3-23-26        |
+| 5    | Mar 24 – Mar 30 | Hybrid search (BM25 + HNSW via RRF)                   | 3-30-26        |
+| 6    | Mar 31 – Apr 6  | Hallucination detector — all four layers + FastAPI     | 4-6-26         |
+| 7    | Apr 7 – Apr 13  | Benchmark dataset construction + Streamlit scaffold   | 4-9-26         |
+| 8    | Apr 14 – Apr 20 | Evaluation, threshold tuning, Layer 4, CV             | 4-10-26        |
+| 9    | Apr 21 – Apr 27 | Error analysis + citation graph visualization         |                |
+| 10   | Apr 28 – May 8  | Final writeup and submission                          |                |
 
 ---
 
@@ -684,6 +705,133 @@ The perfect test-set scores are real but should be interpreted carefully:
   current layer. Detecting contextual misuse would require reading and reasoning about
   the full opinion text, not just checking existence and metadata. This is a known
   limitation documented as future work.
+
+#### Week 8 (REDONE) — Evaluation, Threshold Tuning, and Benchmark Expansion
+
+##### Overview
+
+Week 8 focused on honest evaluation of the hallucination detector. The initial pipeline from Weeks 6–7 was run against the benchmark, results were analyzed, a fourth detection layer was added to close a gap exposed by the evaluation, the benchmark was expanded from 200 to 500 entries, and 10-fold cross-validation was run to verify that strong results were stable rather than lucky.
+
+---
+
+##### What Was Built
+
+###### Layer 4 — Metadata Validation (`detector/metadata_check.py`)
+
+The first evaluation run revealed that all subtype B hallucinations (real case, corrupted metadata) were passing Layers 1–3 with full confidence. This was expected — a Type B citation uses a real `case_id`, so it exists in Neo4j, produces a valid semantic score, and has a strong citation network footprint. Layers 1–3 have no signal to distinguish it from a genuine citation.
+
+Layer 4 was added to close this gap. It extracts the court identifier and year from the citation string and compares them against the actual properties stored on the Neo4j Case node. A mismatch flags the citation as `HALLUCINATED`.
+
+Court extraction uses two strategies in order:
+1. **Direct CourtListener ID match** — detects bare court IDs injected into citation parentheticals, e.g. `"476 U.S. 207 (ca11)"` where `ca11` is extracted and compared against the node's `court_id`
+2. **Alias match** — detects natural-language court strings in formatted citations, e.g. `"4th Cir."` → `ca4`
+
+Layer 4 is skipped when no year or court can be extracted from the citation string. Pure reporter citations like `"392 U.S. 1"` cannot be validated and are not penalized.
+
+###### Neo4j Court ID Backfill (`db/backfill_court_id.py`)
+
+Layer 4 requires `court_id` to be present on Neo4j Case nodes, but the graph was built in Week 3 without that property. This one-time migration script reads `court_id` from `cases_enriched.parquet` — which has zero nulls across all 1,353 cases — and writes it to every matching Case node in batches of 200.
+
+###### Evaluation Scripts
+
+| Script | Purpose |
+|---|---|
+| `benchmark/evaluate.py` | Loads benchmark, creates stratified 80/20 val/test split, sweeps 180 threshold combinations on val set, saves best to `tuned_thresholds.json` |
+| `benchmark/report.py` | Loads tuned thresholds, runs inference on held-out test set, writes `eval_report.json` with per-layer and combined metrics |
+
+The val/test split is cached to `benchmark/split_indices.json` on first run and never reshuffled, ensuring the test set remains truly held-out across all subsequent runs.
+
+###### Benchmark Expansion (`benchmark/expand_benchmark.py`)
+
+The original 200-entry benchmark produced F1=1.0 on a 40-entry test set — a real result, but statistically weak at that scale. The benchmark was expanded to 500 entries to reduce variance and provide a more meaningful evaluation surface.
+
+| Type | Original | Added | Final |
+|---|---|---|---|
+| Real | 100 | 150 | 250 |
+| Type A — Fabricated | 33 | 40 | 73 |
+| Type B — Corrupted metadata | 34 | 70 | 104 |
+| Type C — Plausible nonexistent | 33 | 40 | 73 |
+| **Total** | **200** | **300** | **500** |
+
+Type B was weighted more heavily in the expansion (70 new entries vs 40 for A and C) because it is the hardest subtype for the pipeline to detect. The expansion also shifts Type B corruptions to 60% court / 40% year (vs 50/50 in the original) to more aggressively stress Layer 4.
+
+###### 10-Fold Cross-Validation (`benchmark/cross_validate.py`)
+
+To verify that the strong test-set results were stable rather than a product of a favorable split, 10-fold stratified cross-validation was run on the full 500-entry benchmark. Stratification preserves the real/hallucinated balance and subtype distribution across all folds.
+
+The script includes fold-level checkpointing — completed folds are saved after each fold, so the run is safe to interrupt and resume without restarting from fold 1.
+
+---
+
+##### Threshold Tuning
+
+`evaluate.py` sweeps 180 threshold combinations on the 400-entry validation set. The combination with the highest F1 is selected, with ties broken by precision — fewer false alarms is preferred in a legal context.
+
+| Parameter | Config Key | Before | After |
+|---|---|---|---|
+| Cosine similarity floor | `SIMILARITY_THRESHOLD` | 0.75 | 0.60 |
+| RRF score floor | `RRF_THRESHOLD` | — | 0.010 |
+| Citation density minimum | `CITATION_DENSITY_THRESHOLD` | 3 | 1 |
+
+The sweep landed at minimum values across all three parameters. This reflects that Layers 2 and 3 contribute no independent signal on Type B hallucinations — those are handled entirely by Layer 4 — and that no false positives were observed at any threshold level on this benchmark.
+
+---
+
+##### Results
+
+###### Test Set (held-out 100 entries)
+
+| Layer | Precision | Recall | F1 |
+|---|---|---|---|
+| Layer 1 — Existence | 1.000 | 0.580 | 0.734 |
+| Layer 2 — Semantic | 0.000 | 0.000 | 0.000 |
+| Layer 3 — Connectivity | 0.000 | 0.000 | 0.000 |
+| Layer 4 — Metadata | 1.000 | 0.952 | 0.976 |
+| **Combined** | **1.000** | **0.980** | **0.990** |
+
+Subtype F1: A=1.000, B=0.976, C=1.000. Zero false positives. One FN (benchmark_id=171):
+Type B year-corrupted citation where the Neo4j node (`United States v. Moses, ca3`)
+stores `year=2025` — the same incorrect year the benchmark injected. Layer 4 compares
+`2025 == 2025`, finds no mismatch, and passes it. Corpus data quality issue; undetectable
+by the current architecture.
+
+###### 10-Fold Cross-Validation (500 entries)
+
+| Layer | Precision | Recall | F1 |
+|---|---|---|---|
+| Layer 1 — Existence | 1.000 ± 0.000 | 0.584 ± 0.020 | 0.737 ± 0.016 |
+| Layer 2 — Semantic | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| Layer 3 — Connectivity | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| Layer 4 — Metadata | 1.000 ± 0.000 | 0.874 ± 0.106 | 0.929 ± 0.062 |
+| **Combined** | **1.000 ± 0.000** | **0.944 ± 0.045** | **0.971 ± 0.024** |
+
+Fold F1 range: 0.936 – 1.000. No anomalous folds detected.
+
+---
+
+##### Interpreting the Results
+
+###### Why the test-set F1 is 0.990
+
+The test-set results are strong but not perfect. While Layers 1 and 3 perform as expected, Layer 4 missed one Type B hallucination (benchmark_id=171) because the underlying Neo4j node contained the same incorrect year (2025) as the injected corruption. This highlights that the detector is only as accurate as the underlying corpus data.
+
+###### Why Layers 2 and 3 show F1=0.0 in isolation
+
+This is not a failure. Every hallucinated citation that reaches Layers 2 and 3 is a Type B case, and Type B cases carry valid semantic scores and strong citation network footprints from the underlying real case. Layers 2 and 3 have no signal to distinguish them from genuine citations. The isolated metrics honestly reflect what each layer contributes on its own. In production, Layers 2 and 3 provide redundancy for edge cases outside this benchmark's scope — for instance, corpus cases that exist in Neo4j but were not indexed in Milvus, or citations where CourtListener resolution is ambiguous.
+
+###### Why Layer 4 recall varies across folds (±0.106)
+
+Some folds contain Type B entries that Layer 4 cannot catch. This happens when a year-corrupted
+citation references a Neo4j node that stores the same (incorrect) year as the benchmark
+corruption, or when the corrupted court ID happens to match the node's actual court. The
+one test-set FN (benchmark_id=171) is a confirmed example of the former — the corpus
+stores `year=2025` on that node, making the mismatch undetectable. This variance is the
+most honest signal from the CV results and is the primary architectural limitation to
+document in the final writeup.
+
+###### The primary undetected hallucination type
+
+The most dangerous real-world hallucination — a real case cited for a legal proposition it does not support — is undetectable by any current layer. Catching this would require the system to read and reason about the full opinion text, not just verify existence and metadata. This is the central limitation and the main direction for future work.
 
 ---
 

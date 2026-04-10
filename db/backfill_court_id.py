@@ -4,6 +4,11 @@ Week 8 — Backfill court_id from cases_enriched.parquet into Neo4j Case nodes.
 
 Run from project root:
     python -m db.backfill_court_id
+
+Note: Landmark nodes are NOT in cases_enriched.parquet — they are loaded via
+db/fetch_landmarks.py which now writes court_id directly. If any non-stub nodes
+still show no court_id after this script, check for landmarks missing court_id
+and patch them manually (all SCOTUS landmarks → court_id = 'scotus').
 """
 
 import sys
@@ -63,6 +68,22 @@ def main():
         driver.close()
 
     logger.info("Done — %d court_id properties written to Neo4j", updated)
+
+    # Post-run verification — warn if any non-stub nodes still lack court_id
+    with driver.session() as session:
+        result = session.run(
+            "MATCH (c:Case {stub: false}) WHERE c.court_id IS NULL RETURN count(c) AS n"
+        )
+        remaining = result.single()["n"]
+        if remaining == 0:
+            logger.info("Verification passed — zero non-stub nodes missing court_id ✅")
+        else:
+            logger.warning(
+                "⚠️  %d non-stub node(s) still missing court_id after backfill. "
+                "These are likely landmark nodes not in the parquet. "
+                "Check fetch_landmarks.py or patch manually.",
+                remaining,
+            )
 
 
 if __name__ == "__main__":
