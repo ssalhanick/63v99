@@ -201,8 +201,7 @@ def render_citation_result(citation: dict, show_llm: bool) -> None:
 st.title("⚖️ Verit")
 st.caption("Legal Citation Hallucination Detector · Fourth Amendment Corpus")
 
-tab_checker, tab_map = st.tabs(["⚖️ Citation Checker", "🗺️ Corpus Map"])
-
+tab_checker, tab_map, tab_graph = st.tabs(["⚖️ Citation Checker", "🗺️ Corpus Map", "🔗 Citation Graph"])
 
 # ── Tab 1 — Citation Checker ──────────────────────────────────────────────────
 with tab_checker:
@@ -343,3 +342,87 @@ with tab_map:
             )
 
         st.plotly_chart(fig, use_container_width=True)
+
+# ── Tab 3 — Citation Graph ────────────────────────────────────────────────────
+with tab_graph:
+    st.subheader("Citation Graph Explorer")
+    st.caption(
+        "Neo4j subgraph for REAL and SUSPICIOUS citations. "
+        "Node size = citation count. "
+        "🔴 Submitted case · 🟡 Landmark · 🔵 Corpus · ⚫ Stub"
+    )
+
+    # Guard: need a prior check result
+    if "last_citations" not in st.session_state or not st.session_state["last_citations"]:
+        st.info("Run a citation check in the ⚖️ Citation Checker tab first.")
+    else:
+        # Filter to only REAL / SUSPICIOUS — HALLUCINATED are not in Neo4j
+        graphable = [
+            c for c in st.session_state["last_citations"]
+            if c.get("verdict") in ("REAL", "SUSPICIOUS")
+        ]
+
+        if not graphable:
+            st.info("No REAL or SUSPICIOUS citations in the last check result.")
+        else:
+            # ── Controls ──────────────────────────────────────────────────────
+            col_drop, col_hops = st.columns([4, 1])
+
+            with col_drop:
+                VERDICT_ICON = {"REAL": "🟢", "SUSPICIOUS": "🟡"}
+
+                options = {
+                    f"{VERDICT_ICON.get(c['verdict'], '⚪')} "
+                    f"{c.get('case_name') or c['citation_string']} "
+                    f"({c['citation_string']})": c
+                    for c in graphable
+                }
+                selected_label = st.selectbox(
+                    "Select citation to explore",
+                    options=list(options.keys()),
+                )
+                selected_citation = options[selected_label]
+
+            with col_hops:
+                hops = st.radio(
+                    "Hops",
+                    options=[1, 2],
+                    index=1,
+                    horizontal=True,
+                )
+
+            st.divider()
+
+            # ── Graph render ──────────────────────────────────────────────────
+            case_id = selected_citation["case_id"]
+
+            try:
+                from visualization.graph_viz import render_graph_html
+
+                with st.spinner("Querying Neo4j and building graph..."):
+                    graph_result = render_graph_html(case_id, hops=hops)
+
+                if graph_result is None:
+                    st.warning(
+                        f"No citation relationships found in Neo4j for case ID {case_id}. "
+                        "The case may exist as a node but have no outgoing CITES edges."
+                    )
+                else:
+                    html, node_count, edge_count = graph_result
+                    st.caption(f"**{node_count}** nodes · **{edge_count}** edges · {hops}-hop neighborhood")
+                    st.components.v1.html(html, height=620, scrolling=False)
+
+                    # ── Neo4j Browser button ──────────────────────────────────
+                    import urllib.parse
+                    cypher = (
+                        f"MATCH path = (c:Case {{id: {case_id}}})-[:CITES*1..2]->(neighbor:Case)\n"
+                        f"RETURN path\n"
+                        f"LIMIT 100"
+                    )
+                    encoded = urllib.parse.quote(cypher)
+                    neo4j_url = f"http://localhost:7474/browser/?cmd=edit&arg={encoded}"
+
+                    st.link_button("🔍 Open in Neo4j Browser", neo4j_url)
+
+            except Exception as e:
+                st.error(f"Graph render failed: {e}")
