@@ -21,15 +21,17 @@ Note on case_id:
 
 import re
 import logging
+import ast
 import requests
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from eyecite import get_citations
 from eyecite.models import FullCaseCitation
 
-from config import COURTLISTENER_TOKEN, COURTLISTENER_BASE_URL
+from config import COURTLISTENER_TOKEN, COURTLISTENER_BASE_URL, PROCESSED_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,64 @@ def _extract_context(full_text: str, citation_string: str, window: int = CONTEXT
 
 
 # ---------------------------------------------------------------------------
+# Corpus citation index  (fallback when CourtListener API returns None)
+# ---------------------------------------------------------------------------
+
+def _build_corpus_index() -> dict[str, tuple[int, str]]:
+    """
+    Build a lookup dict from the local parquet corpus:
+        citation_string  ->  (case_id, case_name)
+
+    Used as a fallback when the CourtListener live API does not return a
+    cluster_id for a citation that is nonetheless present in our corpus.
+    Each case's `citations` column is a list of reporter strings, e.g.
+    ["901 F.3d 1042", "2018 WL 123456"].  Any of those strings can be used
+    to find the case_id.
+
+    Returns an empty dict if the parquet file is missing.
+    """
+    parquet_path = Path(PROCESSED_DIR) / "cases_enriched.parquet"
+    if not parquet_path.exists():
+        logger.warning("Corpus parquet not found at %s — fallback disabled", parquet_path)
+        return {}
+
+    try:
+        import pandas as pd
+        df = pd.read_parquet(parquet_path, columns=["case_id", "case_name", "citations"])
+    except Exception as e:
+        logger.warning("Could not load corpus parquet for citation index: %s", e)
+        return {}
+
+    index: dict[str, tuple[int, str]] = {}
+    for _, row in df.iterrows():
+        cid  = int(row["case_id"])
+        name = str(row["case_name"]) if row["case_name"] else ""
+        raw  = row["citations"]
+
+        # citations may be a list already or a JSON/repr string
+        if isinstance(raw, list):
+            cit_list = raw
+        elif isinstance(raw, str):
+            try:
+                cit_list = ast.literal_eval(raw)
+            except Exception:
+                cit_list = [raw]
+        else:
+            cit_list = []
+
+        for cit_str in cit_list:
+            if isinstance(cit_str, str) and cit_str.strip():
+                index[cit_str.strip()] = (cid, name)
+
+    logger.info("Corpus citation index built: %d citation strings -> case_ids", len(index))
+    return index
+
+
+# Built once at module import — shared by all calls to _resolve_citation
+_CORPUS_INDEX: dict[str, tuple[int, str]] = _build_corpus_index()
+
+
+# ---------------------------------------------------------------------------
 # CourtListener resolution
 # ---------------------------------------------------------------------------
 
@@ -100,19 +160,37 @@ _API_DELAY = 0.5  # seconds — polite delay between API calls
 
 def _resolve_citation(volume: int, reporter: str, page: int) -> tuple[Optional[int], Optional[str]]:
     """
-    POST to CourtListener /citation-lookup/ for exact citation match.
+    Resolve a citation to a (case_id, case_name) pair compatible with Neo4j.
 
-    Endpoint: POST /api/rest/v4/citation-lookup/
-    Body: {"text": "392 U.S. 1"}
+    Two-stage lookup — corpus index is checked FIRST:
 
-    Response is a list; each item has a clusters[] array. We take the first
-    cluster's id (cluster ID) as case_id — this matches the id field on Neo4j
-    Case nodes loaded by graph_loader.py.
+      1. Corpus parquet index  — exact match against the reporter strings scraped
+                                 into Verit. case_ids here are guaranteed to match
+                                 Neo4j (both loaded from the same CourtListener
+                                 scrape). This is the primary source of truth.
 
-    Returns: (cluster_id, case_name) — both None if not found.
+      2. CourtListener live API — fallback for citations not in our corpus.
+                                  CourtListener may have re-indexed or re-merged
+                                  clusters since our scrape, so its cluster IDs
+                                  can differ from the Neo4j node IDs. Only used
+                                  when the corpus index has no match.
+
+    Returns: (case_id, case_name) — both None if neither stage resolves it.
     """
     citation_string = f"{volume} {reporter} {page}"
 
+    # ---- Stage 1: Corpus index (primary — guaranteed Neo4j-compatible IDs) --
+    if citation_string in _CORPUS_INDEX:
+        cid, name = _CORPUS_INDEX[citation_string]
+        logger.info(
+            "Resolved '%s' via corpus index -> case_id=%d ('%s')",
+            citation_string, cid, name,
+        )
+        return cid, name
+
+    logger.debug("'%s' not in corpus index — trying CourtListener API", citation_string)
+
+    # ---- Stage 2: CourtListener API (fallback for out-of-corpus citations) --
     try:
         resp = requests.post(
             LOOKUP_URL,
@@ -123,25 +201,28 @@ def _resolve_citation(volume: int, reporter: str, page: int) -> tuple[Optional[i
         resp.raise_for_status()
         data = resp.json()
 
-        if not data:
-            logger.debug("No citation-lookup result for %s", citation_string)
-            return None, None
+        clusters = data[0].get("clusters", []) if data else []
+        if clusters:
+            cluster    = clusters[0]
+            cluster_id = cluster.get("id")
+            case_name  = cluster.get("case_name")
+            if cluster_id is not None:
+                logger.info(
+                    "Resolved '%s' via CourtListener API -> case_id=%d",
+                    citation_string, cluster_id,
+                )
+                return cluster_id, case_name
 
-        clusters = data[0].get("clusters", [])
-        if not clusters:
-            logger.debug("No clusters returned for %s", citation_string)
-            return None, None
-
-        cluster = clusters[0]
-        cluster_id = cluster.get("id")
-        case_name = cluster.get("case_name")
-        return cluster_id, case_name
+        logger.debug("CourtListener API returned no cluster for '%s'", citation_string)
 
     except requests.RequestException as e:
-        logger.warning("CourtListener API error for %s: %s", citation_string, e)
-        return None, None
+        logger.warning("CourtListener API error for '%s': %s", citation_string, e)
     finally:
         time.sleep(_API_DELAY)
+
+    logger.info("Could not resolve '%s' via corpus index or CourtListener API", citation_string)
+    return None, None
+
 
 
 # ---------------------------------------------------------------------------

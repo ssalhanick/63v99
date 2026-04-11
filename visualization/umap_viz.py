@@ -191,7 +191,14 @@ def overlay_submitted_citations(
 ) -> None:
     """
     Add submitted citation points as an overlay on the base corpus figure.
-    Colors: green=REAL, yellow=SUSPICIOUS, red=HALLUCINATED.
+    Colors: green=REAL, orange=SUSPICIOUS, red=HALLUCINATED.
+
+    Focus mode: dims all corpus traces to 0.12 opacity so overlaid citations
+    stand out clearly.
+
+    HALLUCINATED fallback: if a citation has no corpus case_id (i.e. it does
+    not exist in the graph), its marker is placed at the centroid of its
+    top_matches coordinates so it still appears on the map.
 
     Modifies base_fig in place.
 
@@ -200,7 +207,8 @@ def overlay_submitted_citations(
         coords:     UMAP 2D coordinates from the same build call
         case_ids:   List of corpus case_ids in same order as coords
         verdicts:   List of verdict dicts from the API response
-                    (must have case_id and verdict fields)
+                    Each dict must have: verdict, citation_string.
+                    Optional: case_id (int), top_matches (list of dicts with case_id).
     """
     try:
         import plotly.graph_objects as go
@@ -220,30 +228,68 @@ def overlay_submitted_citations(
 
     id_to_coord = {cid: coords[i] for i, cid in enumerate(case_ids)}
 
+    # ── Focus mode: dim all existing corpus traces ─────────────────────────
+    for trace in base_fig.data:
+        trace.update(opacity=0.12)
+
+    placed = 0
     for v in verdicts:
-        cid     = v.get("case_id")
-        verdict = v.get("verdict", "UNKNOWN")
-        name    = v.get("citation_string", "Unknown")
+        cid         = v.get("case_id")
+        verdict     = v.get("verdict", "UNKNOWN")
+        name        = v.get("citation_string", "Unknown")
+        top_matches = v.get("top_matches", [])
 
-        if cid is None or cid not in id_to_coord:
-            continue   # hallucinated cases won't have coords — skip
+        # Determine coordinates
+        x, y = None, None
 
-        x, y = float(id_to_coord[cid][0]), float(id_to_coord[cid][1])
+        if cid is not None and cid in id_to_coord:
+            # Citation exists directly in corpus
+            x, y = float(id_to_coord[cid][0]), float(id_to_coord[cid][1])
+        elif top_matches:
+            # Fallback: centroid of top_matches coordinates (for HALLUCINATED)
+            match_coords = [
+                id_to_coord[m["case_id"]]
+                for m in top_matches
+                if m.get("case_id") in id_to_coord
+            ]
+            if match_coords:
+                arr  = np.array(match_coords)
+                x, y = float(arr[:, 0].mean()), float(arr[:, 1].mean())
+                log.debug(
+                    "HALLUCINATED '%s' placed at top_matches centroid (%.2f, %.2f)",
+                    name, x, y,
+                )
+
+        if x is None:
+            log.warning("No coordinate found for citation '%s' — skipping", name)
+            continue
+
+        label_short = name[:35] + "…" if len(name) > 35 else name
 
         base_fig.add_trace(go.Scatter(
             x=[x], y=[y],
-            mode="markers",
+            mode="markers+text",
             marker=dict(
                 color=color_map.get(verdict, "gray"),
-                size=14,
+                size=18,
                 symbol=symbol_map.get(verdict, "circle"),
-                line=dict(color="white", width=1.5),
+                line=dict(color="white", width=2),
             ),
+            text=[label_short],
+            textposition="top center",
+            textfont=dict(size=11, color=color_map.get(verdict, "gray")),
             name=f"{verdict}: {name[:40]}",
-            hovertext=f"{name}<br>Verdict: {verdict}",
+            hovertext=(
+                f"<b>{name}</b><br>"
+                f"Verdict: <b>{verdict}</b><br>"
+                + ("(placed at semantic neighbors' centroid)" if cid is None else f"case_id: {cid}")
+            ),
             hoverinfo="text",
             showlegend=True,
         ))
+        placed += 1
+
+    log.info("Overlaid %d/%d submitted citation(s) on corpus map", placed, len(verdicts))
 
 
 # ── Standalone export ─────────────────────────────────────────────────────────

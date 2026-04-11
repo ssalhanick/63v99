@@ -114,7 +114,7 @@ def render_citation_result(citation: dict, show_llm: bool) -> None:
     citation_string = citation.get("citation_string", "Unknown")
     semantic_score  = citation.get("semantic_score")
     density_score   = citation.get("density_score")
-    existence       = citation.get("existence", False)
+    existence       = citation.get("exists", False)
     top_matches     = citation.get("top_matches", [])
     context_text    = citation.get("context_text", "")
 
@@ -334,9 +334,12 @@ with tab_map:
         if "last_citations" in st.session_state and st.session_state["last_citations"]:
             from visualization.umap_viz import overlay_submitted_citations
             overlay_submitted_citations(fig, coords, case_ids, st.session_state["last_citations"])
+            n = len(st.session_state["last_citations"])
             st.caption(
-                f"★ Overlaid {len(st.session_state['last_citations'])} submitted citation(s). "
-                "Stars=REAL · Diamonds=SUSPICIOUS · X=HALLUCINATED"
+                f"★ Overlaid {n} submitted citation(s) — corpus dimmed for focus. "
+                "⭐ Stars=REAL · ◆ Diamonds=SUSPICIOUS · ✕ X=HALLUCINATED. "
+                "Hallucinated citations without a corpus match are placed at their "
+                "closest semantic neighbors' centroid."
             )
 
         st.plotly_chart(fig, use_container_width=True)

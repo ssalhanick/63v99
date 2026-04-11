@@ -49,16 +49,16 @@ HNSW_EF               = 50    # query-time search width
 
 # ANN search parameters (Week 5)
 TOP_K                  = 5     # candidates returned per query
-SIMILARITY_THRESHOLD   = 0.75  # cosine similarity floor — tune on validation set in Week 8
+SIMILARITY_THRESHOLD   = 0.6  # cosine similarity floor — tune on validation set in Week 8
 
 # Hybrid search — Reciprocal Rank Fusion (Week 5)
 # RRF score = 1/(k + rank_dense) + 1/(k + rank_sparse)
-RRF_THRESHOLD = 0.02
+RRF_THRESHOLD = 0.01
 RRF_K                  = 60    # smoothing constant — standard default, rarely needs tuning
 BM25_INDEX_PATH        = os.path.join(PROCESSED_DIR, "bm25_index.pkl")
 
 # Connectivity (Layer 3 — Option B)
-CITATION_DENSITY_THRESHOLD = 3   # minimum shared citations — tune on validation set in Week 8
+CITATION_DENSITY_THRESHOLD = 1   # minimum shared citations — tune on validation set in Week 8
 
 # Cache (Week 6)
 CACHE_TTL             = 3600   # seconds — TTL for query embedding + ANN result cache

@@ -232,7 +232,31 @@ docker-compose up -d
 
 ```bash
 docker ps
+docker logs verit_neo4j --tail 3   # confirm "Started."
 ```
+
+### 6. Start the FastAPI Backend
+
+Open a terminal and keep it running:
+
+```powershell
+uvicorn api.main:app --reload
+```
+
+Wait until you see `Uvicorn running on http://127.0.0.1:8000` before proceeding.
+
+### 7. Start the Streamlit Frontend
+
+Open a **second terminal** (FastAPI must stay running in the first):
+
+```powershell
+streamlit run frontend/app.py
+```
+
+The app will open automatically at `http://localhost:8501`.
+
+> Both terminals must stay open simultaneously. FastAPI handles detection;
+> Streamlit is the UI. Closing either will break the other.
 
 ---
 
@@ -304,7 +328,7 @@ Fold F1 range: 0.936 – 1.000. No anomalous folds. Zero false positives across 
 | 3    | Mar 10 – Mar 16 | Neo4j graph build and verification                    | 3-16-26        |
 | 4    | Mar 17 – Mar 23 | BERT embedding pipeline + Milvus indexing             | 3-23-26        |
 | 5    | Mar 24 – Mar 30 | Hybrid search (BM25 + HNSW via RRF)                   | 3-30-26        |
-| 6    | Mar 31 – Apr 6  | Hallucination detector — all four layers + FastAPI     | 4-6-26         |
+| 6    | Mar 31 – Apr 6  | Hallucination detector — all four layers + FastAPI    | 4-6-26         |
 | 7    | Apr 7 – Apr 13  | Benchmark dataset construction + Streamlit scaffold   | 4-9-26         |
 | 8    | Apr 14 – Apr 20 | Evaluation, threshold tuning, Layer 4, CV             | 4-10-26        |
 | 9    | Apr 21 – Apr 27 | Error analysis + citation graph visualization         |                |
@@ -832,6 +856,43 @@ document in the final writeup.
 ###### The primary undetected hallucination type
 
 The most dangerous real-world hallucination — a real case cited for a legal proposition it does not support — is undetectable by any current layer. Catching this would require the system to read and reason about the full opinion text, not just verify existence and metadata. This is the central limitation and the main direction for future work.
+
+### Week 9 — Visualization & Frontend Integration
+
+**Date:** April 11, 2026
+
+#### Built This Week
+- `benchmark/density_histogram.py` — new script that reads `per_entry` from
+  `eval_report.json` and plots citation density distributions for REAL vs.
+  HALLUCINATED labels; saved to `visualization/density_histogram.png`
+
+#### Configuration Changes
+- `config.py` — updated three thresholds:
+  - `SIMILARITY_THRESHOLD` 0.75 → 0.60
+  - `RRF_THRESHOLD` 0.02 → 0.010
+  - `CITATION_DENSITY_THRESHOLD` 3 → 1
+
+#### Outputs Generated
+- `visualization/umap_circuit.html` — standalone UMAP colored by circuit; 1,353
+  corpus cases; left-cluster grouping consistent with circuit-level semantic similarity
+- `visualization/umap_year.html` — standalone UMAP colored by year
+- `visualization/density_histogram.png` — density distribution across 50 REAL and
+  21 HALLUCINATED entries (29 HALLUCINATED entries have `density_score=None`;
+  these were caught before Layer 3 and never received a score)
+
+#### Validated This Week
+- Full app smoke test: FastAPI + Streamlit running end-to-end
+- UMAP overlay confirmed working: REAL citations plot as stars inside corpus
+  clusters, SUSPICIOUS citations plot as diamonds in distinct regions
+- Haiku explanation streaming confirmed for REAL verdicts
+- UMAP runtime: ~30s on first cache load; fit on 1,353 cases, output shape (1,353, 2)
+
+#### Known Limitations Documented
+- 29 of 50 HALLUCINATED benchmark entries have `density_score=None` — hard
+  hallucinations (fabricated IDs) are caught before Layer 3 and excluded from
+  the density histogram; histogram reflects Type B hallucinations only
+- Terry v. Ohio returns `density_score=0` — landmark case is not in the Verit
+  corpus, so Layer 3 has no graph footprint to evaluate against
 
 ---
 
