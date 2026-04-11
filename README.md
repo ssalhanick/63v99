@@ -894,6 +894,61 @@ The most dangerous real-world hallucination — a real case cited for a legal pr
 - Terry v. Ohio returns `density_score=0` — landmark case is not in the Verit
   corpus, so Layer 3 has no graph footprint to evaluate against
 
+
+
+ 
+### Week 10 — Citation Graph Tab & Final Visualizations
+ 
+#### What Was Built
+ 
+**`visualization/graph_viz.py`** — New module that queries Neo4j for the citation
+subgraph of a submitted case and renders it as an interactive PyVis network.
+ 
+- Pulls 1- or 2-hop `CITES` neighborhoods from Neo4j
+- Node color: 🔴 submitted case · 🟡 landmark · 🔵 corpus · ⚫ stub
+- Node size proportional to `cite_count`
+- Hover tooltips: case name, year, court, citation count
+- Returns HTML string for embedding in Streamlit
+ 
+**`frontend/app.py`** — Added Tab 3: 🔗 Citation Graph
+ 
+- Dropdown selects from REAL/SUSPICIOUS citations in the last check result
+- 1-hop / 2-hop toggle
+- PyVis graph rendered via `st.components.v1.html()`
+- "Open in Neo4j Browser" button (`st.link_button`) pre-fills a Cypher query
+  at `localhost:7474` for deeper exploration
+ 
+#### Bug Fixes This Week
+ 
+- **Cypher parameter map syntax error** — Neo4j does not accept `$param` inside
+  `MATCH` pattern maps or relationship length syntax (`*1..$hops`). Fixed by
+  switching to an f-string with literals baked in directly.
+- **Stub filter removing all results** — The `WHERE neighbor.stub = false` clause
+  was filtering out the entire 1-hop neighborhood for cases whose citations are
+  all stub nodes. Removed the filter; stubs now render as gray nodes, which is
+  informative rather than invisible.
+ 
+#### Visualizations Complete
+ 
+| Visualization | File | Status |
+|---|---|---|
+| UMAP by circuit | `visualization/umap_circuit.html` | ✅ |
+| UMAP by year | `visualization/umap_year.html` | ✅ |
+| UMAP with hallucination overlay | Screenshot — Corpus Map tab | ✅ |
+| Citation density histogram | `visualization/density_histogram.png` | ✅ |
+| Citation Graph (PyVis) | Screenshot — Citation Graph tab | ✅ |
+ 
+#### Install
+ 
+```powershell
+pip install pyvis
+```
+ 
+Add to `requirements.txt`:
+```
+pyvis==0.3.2
+```
+ 
 ---
 
 ### API Security
