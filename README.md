@@ -1070,6 +1070,50 @@ failure modes of the detector.
 RRF threshold, and citation density threshold will all be tuned on a held-out validation
 split, never on the test set.
 
+### After Week 10
+
+feat: Layer 2b LLM check, landmark enrichment, and frontend improvements
+
+- Add detector/llm_check.py — Claude Haiku proposition accuracy check (Layer 2b)
+  - Fetches case opinion excerpt from parquet, sends to Haiku with structured prompt
+  - Returns is_accurate bool + one-sentence reason for frontend display
+  - Graceful fallback (skipped=True) on timeout or parse error
+
+- Update detector/pipeline.py — integrate Layer 2b into verdict logic
+  - REAL requires L2a PASS + L2b PASS + L3 PASS
+  - Any failure after L1 → SUSPICIOUS (never HALLUCINATED for existing cases)
+  - Add llm_result field to CitationVerdict dataclass
+
+- Update api/main.py — expose LLMCheckResult in API response
+  - New LLMCheckResult model with is_accurate, reason, tokens_used, skipped
+  - CitationResult extended with llm_check field
+
+- Add data/enrich_landmarks.py — landmark case enrichment pipeline
+  - Fetches HTML opinion text from CourtListener, strips tags
+  - Pulls citations from cluster endpoint (type 1/2/3 only, excludes LEXIS/USLW)
+  - Embeds with Legal-BERT, inserts into Milvus
+  - Upserts Neo4j nodes with landmark=true flag
+  - Updates cases_enriched.parquet and rebuilds BM25 index
+  - Covers: Terry v. Ohio, Katz, Mapp, Leon, Illinois v. Gates
+
+- Update frontend/app.py — surface LLM reasons and CourtListener links
+  - SUSPICIOUS cards show yellow "Why suspicious" box with Haiku reason
+  - REAL cards show blue "Proposition verified" box with Haiku reason
+  - Top matches table adds CourtListener search link column
+  - HALLUCINATED expander label changed to "Closest real cases", open by default
+
+- Fix data/enrich_case_id.py — PyArrow type error on parquet write
+  - Serialize list citations to str before writing to match existing schema
+
+- Fix cases_enriched.parquet — patch Novak citation string
+  - Corrected from 969 F.3d 285 (wrong) to 33 F.4th 296 (correct)
+
+Known limitations:
+
+- 369 cases missing citation strings (non-standard reporters, not fixable)
+- HALLUCINATED top_matches empty — Layer 1 short-circuit skips semantic search
+- Terry v. Ohio density=0 due to corpus coverage (SCOTUS vs state court corpus)
+
 ## Acknowledgements
 
 - [CourtListener](https://www.courtlistener.com) — Free Law Project
