@@ -352,12 +352,12 @@ held-out 100-entry test set and 10-fold cross-validation over the full 500.
 
 ### Test Set Results (held-out 100 entries)
 
-| Layer                  | Precision | Recall | F1    |
-| ---------------------- | --------- | ------ | ----- |
-| Layer 1 — Existence    | 1.000     | 0.580  | 0.734 |
-| Layer 2 — Semantic     | 0.000     | 0.000  | 0.000 |
-| Layer 3 — Connectivity | 0.000     | 0.000  | 0.000 |
-| Layer 4 — Metadata     | 1.000     | 0.952  | 0.976 |
+| Layer                  | Precision | Recall    | F1        |
+| ---------------------- | --------- | --------- | --------- |
+| Layer 1 — Existence    | 1.000     | 0.580     | 0.734     |
+| Layer 2 — Semantic     | 0.000     | 0.000     | 0.000     |
+| Layer 3 — Connectivity | 0.000     | 0.000     | 0.000     |
+| Layer 4 — Metadata     | 1.000     | 0.952     | 0.976     |
 | **Combined**           | **1.000** | **0.980** | **0.990** |
 
 Subtype F1: A=1.000, B=0.976, C=1.000. Zero false positives. One FN (benchmark_id=171): Type B year-corrupted citation where the Neo4j node stores the same incorrect year the benchmark injected — corpus data quality issue, undetectable by Layer 4.
@@ -804,6 +804,7 @@ The first evaluation run revealed that all subtype B hallucinations (real case, 
 Layer 4 was added to close this gap. It extracts the court identifier and year from the citation string and compares them against the actual properties stored on the Neo4j Case node. A mismatch flags the citation as `HALLUCINATED`.
 
 Court extraction uses two strategies in order:
+
 1. **Direct CourtListener ID match** — detects bare court IDs injected into citation parentheticals, e.g. `"476 U.S. 207 (ca11)"` where `ca11` is extracted and compared against the node's `court_id`
 2. **Alias match** — detects natural-language court strings in formatted citations, e.g. `"4th Cir."` → `ca4`
 
@@ -815,10 +816,10 @@ Layer 4 requires `court_id` to be present on Neo4j Case nodes, but the graph was
 
 ###### Evaluation Scripts
 
-| Script | Purpose |
-|---|---|
+| Script                  | Purpose                                                                                                                                       |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `benchmark/evaluate.py` | Loads benchmark, creates stratified 80/20 val/test split, sweeps 180 threshold combinations on val set, saves best to `tuned_thresholds.json` |
-| `benchmark/report.py` | Loads tuned thresholds, runs inference on held-out test set, writes `eval_report.json` with per-layer and combined metrics |
+| `benchmark/report.py`   | Loads tuned thresholds, runs inference on held-out test set, writes `eval_report.json` with per-layer and combined metrics                    |
 
 The val/test split is cached to `benchmark/split_indices.json` on first run and never reshuffled, ensuring the test set remains truly held-out across all subsequent runs.
 
@@ -826,13 +827,13 @@ The val/test split is cached to `benchmark/split_indices.json` on first run and 
 
 The original 200-entry benchmark produced F1=1.0 on a 40-entry test set — a real result, but statistically weak at that scale. The benchmark was expanded to 500 entries to reduce variance and provide a more meaningful evaluation surface.
 
-| Type | Original | Added | Final |
-|---|---|---|---|
-| Real | 100 | 150 | 250 |
-| Type A — Fabricated | 33 | 40 | 73 |
-| Type B — Corrupted metadata | 34 | 70 | 104 |
-| Type C — Plausible nonexistent | 33 | 40 | 73 |
-| **Total** | **200** | **300** | **500** |
+| Type                           | Original | Added   | Final   |
+| ------------------------------ | -------- | ------- | ------- |
+| Real                           | 100      | 150     | 250     |
+| Type A — Fabricated            | 33       | 40      | 73      |
+| Type B — Corrupted metadata    | 34       | 70      | 104     |
+| Type C — Plausible nonexistent | 33       | 40      | 73      |
+| **Total**                      | **200**  | **300** | **500** |
 
 Type B was weighted more heavily in the expansion (70 new entries vs 40 for A and C) because it is the hardest subtype for the pipeline to detect. The expansion also shifts Type B corruptions to 60% court / 40% year (vs 50/50 in the original) to more aggressively stress Layer 4.
 
@@ -848,11 +849,11 @@ The script includes fold-level checkpointing — completed folds are saved after
 
 `evaluate.py` sweeps 180 threshold combinations on the 400-entry validation set. The combination with the highest F1 is selected, with ties broken by precision — fewer false alarms is preferred in a legal context.
 
-| Parameter | Config Key | Before | After |
-|---|---|---|---|
-| Cosine similarity floor | `SIMILARITY_THRESHOLD` | 0.75 | 0.60 |
-| RRF score floor | `RRF_THRESHOLD` | — | 0.010 |
-| Citation density minimum | `CITATION_DENSITY_THRESHOLD` | 3 | 1 |
+| Parameter                | Config Key                   | Before | After |
+| ------------------------ | ---------------------------- | ------ | ----- |
+| Cosine similarity floor  | `SIMILARITY_THRESHOLD`       | 0.75   | 0.60  |
+| RRF score floor          | `RRF_THRESHOLD`              | —      | 0.010 |
+| Citation density minimum | `CITATION_DENSITY_THRESHOLD` | 3      | 1     |
 
 The sweep landed at minimum values across all three parameters. This reflects that Layers 2 and 3 contribute no independent signal on Type B hallucinations — those are handled entirely by Layer 4 — and that no false positives were observed at any threshold level on this benchmark.
 
@@ -862,13 +863,13 @@ The sweep landed at minimum values across all three parameters. This reflects th
 
 ###### Test Set (held-out 100 entries)
 
-| Layer | Precision | Recall | F1 |
-|---|---|---|---|
-| Layer 1 — Existence | 1.000 | 0.580 | 0.734 |
-| Layer 2 — Semantic | 0.000 | 0.000 | 0.000 |
-| Layer 3 — Connectivity | 0.000 | 0.000 | 0.000 |
-| Layer 4 — Metadata | 1.000 | 0.952 | 0.976 |
-| **Combined** | **1.000** | **0.980** | **0.990** |
+| Layer                  | Precision | Recall    | F1        |
+| ---------------------- | --------- | --------- | --------- |
+| Layer 1 — Existence    | 1.000     | 0.580     | 0.734     |
+| Layer 2 — Semantic     | 0.000     | 0.000     | 0.000     |
+| Layer 3 — Connectivity | 0.000     | 0.000     | 0.000     |
+| Layer 4 — Metadata     | 1.000     | 0.952     | 0.976     |
+| **Combined**           | **1.000** | **0.980** | **0.990** |
 
 Subtype F1: A=1.000, B=0.976, C=1.000. Zero false positives. One FN (benchmark_id=171):
 Type B year-corrupted citation where the Neo4j node (`United States v. Moses, ca3`)
@@ -878,13 +879,13 @@ by the current architecture.
 
 ###### 10-Fold Cross-Validation (500 entries)
 
-| Layer | Precision | Recall | F1 |
-|---|---|---|---|
-| Layer 1 — Existence | 1.000 ± 0.000 | 0.584 ± 0.020 | 0.737 ± 0.016 |
-| Layer 2 — Semantic | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 |
-| Layer 3 — Connectivity | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 |
-| Layer 4 — Metadata | 1.000 ± 0.000 | 0.874 ± 0.106 | 0.929 ± 0.062 |
-| **Combined** | **1.000 ± 0.000** | **0.944 ± 0.045** | **0.971 ± 0.024** |
+| Layer                  | Precision         | Recall            | F1                |
+| ---------------------- | ----------------- | ----------------- | ----------------- |
+| Layer 1 — Existence    | 1.000 ± 0.000     | 0.584 ± 0.020     | 0.737 ± 0.016     |
+| Layer 2 — Semantic     | 0.000 ± 0.000     | 0.000 ± 0.000     | 0.000 ± 0.000     |
+| Layer 3 — Connectivity | 0.000 ± 0.000     | 0.000 ± 0.000     | 0.000 ± 0.000     |
+| Layer 4 — Metadata     | 1.000 ± 0.000     | 0.874 ± 0.106     | 0.929 ± 0.062     |
+| **Combined**           | **1.000 ± 0.000** | **0.944 ± 0.045** | **0.971 ± 0.024** |
 
 Fold F1 range: 0.936 – 1.000. No anomalous folds detected.
 
@@ -919,17 +920,20 @@ The most dangerous real-world hallucination — a real case cited for a legal pr
 **Date:** April 11, 2026
 
 #### Built This Week
+
 - `benchmark/density_histogram.py` — new script that reads `per_entry` from
   `eval_report.json` and plots citation density distributions for REAL vs.
   HALLUCINATED labels; saved to `visualization/density_histogram.png`
 
 #### Configuration Changes
+
 - `config.py` — updated three thresholds:
   - `SIMILARITY_THRESHOLD` 0.75 → 0.60
   - `RRF_THRESHOLD` 0.02 → 0.010
   - `CITATION_DENSITY_THRESHOLD` 3 → 1
 
 #### Outputs Generated
+
 - `visualization/umap_circuit.html` — standalone UMAP colored by circuit; 1,353
   corpus cases; left-cluster grouping consistent with circuit-level semantic similarity
 - `visualization/umap_year.html` — standalone UMAP colored by year
@@ -938,6 +942,7 @@ The most dangerous real-world hallucination — a real case cited for a legal pr
   these were caught before Layer 3 and never received a score)
 
 #### Validated This Week
+
 - Full app smoke test: FastAPI + Streamlit running end-to-end
 - UMAP overlay confirmed working: REAL citations plot as stars inside corpus
   clusters, SUSPICIOUS citations plot as diamonds in distinct regions
@@ -945,38 +950,36 @@ The most dangerous real-world hallucination — a real case cited for a legal pr
 - UMAP runtime: ~30s on first cache load; fit on 1,353 cases, output shape (1,353, 2)
 
 #### Known Limitations Documented
+
 - 29 of 50 HALLUCINATED benchmark entries have `density_score=None` — hard
   hallucinations (fabricated IDs) are caught before Layer 3 and excluded from
   the density histogram; histogram reflects Type B hallucinations only
 - Terry v. Ohio returns `density_score=0` — landmark case is not in the Verit
   corpus, so Layer 3 has no graph footprint to evaluate against
 
-
-
- 
 ### Week 10 — Citation Graph Tab & Final Visualizations
- 
+
 #### What Was Built
- 
+
 **`visualization/graph_viz.py`** — New module that queries Neo4j for the citation
 subgraph of a submitted case and renders it as an interactive PyVis network.
- 
+
 - Pulls 1- or 2-hop `CITES` neighborhoods from Neo4j
 - Node color: 🔴 submitted case · 🟡 landmark · 🔵 corpus · ⚫ stub
 - Node size proportional to `cite_count`
 - Hover tooltips: case name, year, court, citation count
 - Returns HTML string for embedding in Streamlit
- 
+
 **`frontend/app.py`** — Added Tab 3: 🔗 Citation Graph
- 
+
 - Dropdown selects from REAL/SUSPICIOUS citations in the last check result
 - 1-hop / 2-hop toggle
 - PyVis graph rendered via `st.components.v1.html()`
 - "Open in Neo4j Browser" button (`st.link_button`) pre-fills a Cypher query
   at `localhost:7474` for deeper exploration
- 
+
 #### Bug Fixes This Week
- 
+
 - **Cypher parameter map syntax error** — Neo4j does not accept `$param` inside
   `MATCH` pattern maps or relationship length syntax (`*1..$hops`). Fixed by
   switching to an f-string with literals baked in directly.
@@ -984,28 +987,29 @@ subgraph of a submitted case and renders it as an interactive PyVis network.
   was filtering out the entire 1-hop neighborhood for cases whose citations are
   all stub nodes. Removed the filter; stubs now render as gray nodes, which is
   informative rather than invisible.
- 
+
 #### Visualizations Complete
- 
-| Visualization | File | Status |
-|---|---|---|
-| UMAP by circuit | `visualization/umap_circuit.html` | ✅ |
-| UMAP by year | `visualization/umap_year.html` | ✅ |
-| UMAP with hallucination overlay | Screenshot — Corpus Map tab | ✅ |
-| Citation density histogram | `visualization/density_histogram.png` | ✅ |
-| Citation Graph (PyVis) | Screenshot — Citation Graph tab | ✅ |
- 
+
+| Visualization                   | File                                  | Status |
+| ------------------------------- | ------------------------------------- | ------ |
+| UMAP by circuit                 | `visualization/umap_circuit.html`     | ✅     |
+| UMAP by year                    | `visualization/umap_year.html`        | ✅     |
+| UMAP with hallucination overlay | Screenshot — Corpus Map tab           | ✅     |
+| Citation density histogram      | `visualization/density_histogram.png` | ✅     |
+| Citation Graph (PyVis)          | Screenshot — Citation Graph tab       | ✅     |
+
 #### Install
- 
+
 ```powershell
 pip install pyvis
 ```
- 
+
 Add to `requirements.txt`:
+
 ```
 pyvis==0.3.2
 ```
- 
+
 ---
 
 ### API Security
@@ -1054,6 +1058,8 @@ noise.
 structure in the embedding space; PCA collapses legal text embeddings into a dense
 blob. StandardScaler applied before UMAP to prevent high-variance dimensions from
 dominating the 2D projection.
+
+UMAP was selected over PCA because Legal-BERT embeddings lie on a non-linear manifold — linear dimensionality reduction would not faithfully represent the semantic clustering structure. UMAP preserves local neighborhood topology (n_neighbors=15) while allowing global structure to compress, making it appropriate for visualizing semantic similarity clusters in the embedding space.
 
 **Balanced benchmark with 3 hallucination subtypes (Week 7)** — 50/50 real vs
 hallucinated, hallucinated split into: Type A (fully fabricated), Type B (real case,

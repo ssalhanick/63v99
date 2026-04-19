@@ -26,9 +26,11 @@ Security notes:
 import logging
 from typing import Optional
 
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from detector.llm_check import LLMResult
 
 from detector.pipeline import run_pipeline, CitationVerdict
 
@@ -84,17 +86,23 @@ class TopMatch(BaseModel):
     dense_score: float
     bm25_score:  float
 
+class LLMCheckResult(BaseModel):
+    is_accurate:  bool
+    reason:       str
+    tokens_used:  int
+    skipped:      bool
 
 class CitationResult(BaseModel):
     citation_string: str
     case_name:       Optional[str]
     case_id:         Optional[int]
-    verdict:         str                  # REAL | SUSPICIOUS | HALLUCINATED
-    exists:          bool                 # Layer 1
-    semantic_score:  Optional[float]      # Layer 2 — top RRF score
-    dense_score:     Optional[float]      # Layer 2 — top cosine similarity
-    density_score:   Optional[int]        # Layer 3 — shared citation count
-    top_matches:     list[TopMatch]       # Layer 2 corpus candidates (for RAG)
+    verdict:         str
+    exists:          bool
+    semantic_score:  Optional[float]
+    dense_score:     Optional[float]
+    density_score:   Optional[int]
+    llm_check:       Optional[LLMCheckResult]   # NEW
+    top_matches:     list[TopMatch]
 
 
 class CheckCitationResponse(BaseModel):
@@ -102,12 +110,12 @@ class CheckCitationResponse(BaseModel):
     citations:      list[CitationResult]
 
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _verdict_to_response(v: CitationVerdict) -> CitationResult:
-    """Convert a CitationVerdict dataclass to a Pydantic response model."""
     top_matches = [
         TopMatch(
             case_id     = m.get("case_id"),
@@ -122,6 +130,15 @@ def _verdict_to_response(v: CitationVerdict) -> CitationResult:
         for m in v.top_matches
     ]
 
+    llm_check_result = None
+    if v.llm_result:
+        llm_check_result = LLMCheckResult(
+            is_accurate = v.llm_result.is_accurate,
+            reason      = v.llm_result.reason,
+            tokens_used = v.llm_result.tokens_used,
+            skipped     = v.llm_result.skipped,
+        )
+
     return CitationResult(
         citation_string = v.citation_string,
         case_name       = v.case_name,
@@ -131,6 +148,7 @@ def _verdict_to_response(v: CitationVerdict) -> CitationResult:
         semantic_score  = v.semantic.rrf_score        if v.semantic      else None,
         dense_score     = v.semantic.top_dense_score  if v.semantic      else None,
         density_score   = v.connectivity.density_score if v.connectivity else None,
+        llm_check       = llm_check_result,
         top_matches     = top_matches,
     )
 

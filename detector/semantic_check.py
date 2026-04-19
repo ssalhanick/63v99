@@ -319,29 +319,48 @@ def _enrich(
 
     return matches
 
+def _case_specific_similarity(case_id: int, query_vector: list[float]) -> float:
+    """
+    Fetch the stored embedding for a specific case and compute
+    cosine similarity against the query vector.
+    Returns float in [0, 1], or 0.0 if case not found in Milvus.
+    """
+    try:
+        result = _milvus.query(
+            collection_name=MILVUS_COLLECTION,
+            filter=f"case_id == {case_id}",
+            output_fields=["embedding"],
+            limit=1
+        )
+        if not result:
+            log.warning("case_id %d not found in Milvus — defaulting to 0.0", case_id)
+            return 0.0
+
+        case_vector = np.array(result[0]["embedding"])
+        query_array = np.array(query_vector)
+
+        # Cosine similarity (vectors are already L2-normalized)
+        similarity = float(np.dot(query_array, case_vector))
+        return max(0.0, similarity)  # clamp negatives to 0
+
+    except Exception as e:
+        log.error("Milvus query error for case_id %d: %s", case_id, e)
+        return 0.0
+
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+# Case-specific similarity threshold
+CASE_SIMILARITY_THRESHOLD = 0.80  # tune if needed
 
-def semantic_check(context_text: str, top_k: int = TOP_K) -> SemanticResult:
-    """
-    Run hybrid semantic search for a citation context string.
-
-    Args:
-        context_text: The surrounding paragraph text of the citation
-                      (citation string + context from the AI-generated document).
-        top_k:        Number of candidates to retrieve from each index.
-
-    Returns:
-        SemanticResult with rrf_score, is_relevant flag, and top_matches list.
-    """
+def semantic_check(context_text: str, top_k: int = TOP_K, case_id: int = None) -> SemanticResult:
     _load_all()
 
     # 1. Embed context
     query_vector = _embed(context_text)
 
-    # 2. Dense ANN search
+    # 2. Dense ANN search (still needed for top_matches + RRF)
     dense_hits = _dense_search(query_vector, top_k=top_k)
 
     # 3. BM25 sparse search
@@ -350,12 +369,24 @@ def semantic_check(context_text: str, top_k: int = TOP_K) -> SemanticResult:
     # 4. RRF fusion
     fused = _rrf_fuse(dense_hits, sparse_hits)
 
-    # 5. Top RRF score determines relevance
+    # 5. Top RRF score (kept for logging/debugging)
     top_rrf_score   = fused[0][1] if fused else 0.0
     top_dense_score = dense_hits[0][1] if dense_hits else 0.0
-    is_relevant     = top_rrf_score >= RRF_THRESHOLD
 
-    # 6. Enrich top-k results with metadata
+    # 6. Case-specific relevance — compare proposition against THIS case's embedding
+    if case_id is not None:
+        case_sim    = _case_specific_similarity(case_id, query_vector)
+        is_relevant = case_sim >= CASE_SIMILARITY_THRESHOLD
+        log.info(
+            "Layer 2 case-specific similarity: %.4f (threshold=%.2f) → %s",
+            case_sim, CASE_SIMILARITY_THRESHOLD, is_relevant
+        )
+    else:
+        # Fallback to RRF if no case_id provided
+        case_sim    = None
+        is_relevant = top_rrf_score >= RRF_THRESHOLD
+
+    # 7. Enrich top-k results with metadata
     top_matches = _enrich(fused, dense_hits, sparse_hits, top_k)
 
     return SemanticResult(

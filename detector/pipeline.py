@@ -8,14 +8,14 @@ Entry point: run_pipeline(text) → list[CitationVerdict]
 Flow per citation:
     1. EyeCite extracts + resolves citations from raw text
     2. Layer 1 (existence_check)     — does the case exist in Neo4j?
-    3. Layer 2 (semantic_check)      — is the context semantically consistent?
-    4. Layer 3 (connectivity_check)  — does the case have citation footprint?
+    3. Layer 2a (semantic_check)     — is the context Fourth Amendment domain?
+    4. Layer 2b (llm_check)          — does the proposition match this case's holding?
+    5. Layer 3 (connectivity_check)  — does the case have citation footprint?
 
 Verdict logic:
-    Layer 1 FAIL                        → HALLUCINATED (stop, skip Layers 2+3)
-    Layer 1 PASS, Layer 2+3 both PASS   → REAL
-    Layer 1 PASS, Layer 2+3 both FAIL   → HALLUCINATED
-    Layer 1 PASS, Layer 2 XOR Layer 3   → SUSPICIOUS
+    Layer 1 FAIL                         → HALLUCINATED (stop)
+    Layer 1 PASS, L2a PASS, L2b PASS, L3 PASS → REAL
+    Layer 1 PASS, any of L2a/L2b/L3 FAIL     → SUSPICIOUS
 
 Usage:
     python -m detector.pipeline
@@ -31,6 +31,7 @@ from config import NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD
 from detector.eyecite_parser import parse_citations, ResolvedCitation
 from detector.existence_check import check_existence
 from detector.semantic_check import semantic_check, SemanticResult
+from detector.llm_check import llm_check, LLMResult
 from detector.connectivity_check import check_connectivity, ConnectivityResult
 
 logger = logging.getLogger(__name__)
@@ -56,17 +57,18 @@ class CitationVerdict:
     case_id:         Optional[int]
 
     # Layer results
-    exists:          bool                        # Layer 1
-    semantic:        Optional[SemanticResult]    # Layer 2 (None if Layer 1 failed)
-    connectivity:    Optional[ConnectivityResult]# Layer 3 (None if Layer 1 failed)
+    exists:          bool                         # Layer 1
+    semantic:        Optional[SemanticResult]     # Layer 2a (None if L1 failed)
+    llm_result:      Optional[LLMResult]          # Layer 2b (None if L1/L2a failed)
+    connectivity:    Optional[ConnectivityResult] # Layer 3  (None if L1 failed)
 
     # Final verdict
-    verdict:         str                         # REAL | SUSPICIOUS | HALLUCINATED
+    verdict:         str                          # REAL | SUSPICIOUS | HALLUCINATED
 
-    # Context passed to Layer 2
+    # Context passed to layers
     context_text:    str
 
-    # Top corpus matches from Layer 2 (for RAG context in LLM layer)
+    # Top corpus matches from Layer 2a
     top_matches:     list[dict] = field(default_factory=list)
 
 
@@ -75,28 +77,27 @@ class CitationVerdict:
 # ---------------------------------------------------------------------------
 
 def _compute_verdict(
-    exists: bool,
-    semantic: Optional[SemanticResult],
+    exists:       bool,
+    semantic:     Optional[SemanticResult],
+    llm_result:   Optional[LLMResult],
     connectivity: Optional[ConnectivityResult],
 ) -> str:
     """
-    Combine layer results into a final verdict.
-
     Layer 1 FAIL → HALLUCINATED immediately.
-    Both Layer 2 and Layer 3 PASS → REAL.
-    Both Layer 2 and Layer 3 FAIL → HALLUCINATED.
-    One passes, one fails → SUSPICIOUS.
+    Layer 1 PASS → worst case is SUSPICIOUS (case is real, proposition may be wrong).
+
+    REAL requires all of: L2a PASS, L2b PASS (or skipped), L3 PASS.
+    Anything else → SUSPICIOUS.
     """
     if not exists:
         return HALLUCINATED
 
-    l2 = semantic.is_relevant if semantic else False
-    l3 = connectivity.is_connected if connectivity else False
+    l2a = semantic.is_relevant          if semantic     else False
+    l2b = llm_result.is_accurate        if llm_result and not llm_result.skipped else True
+    l3  = connectivity.is_connected     if connectivity else False
 
-    if l2 and l3:
+    if l2a and l2b and l3:
         return REAL
-    elif not l2 and not l3:
-        return HALLUCINATED
     else:
         return SUSPICIOUS
 
@@ -118,7 +119,6 @@ def run_pipeline(text: str) -> list[CitationVerdict]:
     """
     logger.info("Pipeline starting — extracting citations from input text")
 
-    # Parse + resolve citations
     citations: list[ResolvedCitation] = parse_citations(text)
 
     if not citations:
@@ -127,9 +127,7 @@ def run_pipeline(text: str) -> list[CitationVerdict]:
 
     logger.info("Processing %d citation(s)", len(citations))
 
-    # Shared Neo4j driver — reused across all citations
     driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
-
     verdicts = []
 
     try:
@@ -140,16 +138,14 @@ def run_pipeline(text: str) -> list[CitationVerdict]:
             exists = check_existence(citation.case_id, driver=driver)
 
             if not exists:
-                # Short-circuit — no point running Layers 2 and 3
-                logger.info(
-                    "Layer 1 FAIL → HALLUCINATED: %s", citation.citation_string
-                )
+                logger.info("Layer 1 FAIL → HALLUCINATED: %s", citation.citation_string)
                 verdicts.append(CitationVerdict(
                     citation_string = citation.citation_string,
                     case_name       = citation.case_name,
                     case_id         = citation.case_id,
                     exists          = False,
                     semantic        = None,
+                    llm_result      = None,
                     connectivity    = None,
                     verdict         = HALLUCINATED,
                     context_text    = citation.context_text,
@@ -157,22 +153,30 @@ def run_pipeline(text: str) -> list[CitationVerdict]:
                 ))
                 continue
 
-            # Layer 2 — semantic relevance
+            # Layer 2a — semantic domain check
             semantic = semantic_check(citation.context_text)
+
+            # Layer 2b — LLM proposition accuracy check
+            # Only run if 2a passes — saves tokens on clearly off-domain text
+            if semantic.is_relevant:
+                llm_result = llm_check(citation.case_id, citation.context_text)
+            else:
+                logger.info("Layer 2a FAIL — skipping LLM check for %s", citation.citation_string)
+                llm_result = None
 
             # Layer 3 — citation connectivity
             connectivity = check_connectivity(citation.case_id, driver=driver)
 
             # Final verdict
-            verdict = _compute_verdict(exists, semantic, connectivity)
+            verdict = _compute_verdict(exists, semantic, llm_result, connectivity)
 
             logger.info(
-                "Verdict: %s | L1=%s L2=%s (rrf=%.4f, dense=%.4f) L3=%s (density=%d)",
+                "Verdict: %s | L1=%s L2a=%s (rrf=%.4f) L2b=%s L3=%s (density=%d)",
                 verdict,
                 exists,
                 semantic.is_relevant,
                 semantic.rrf_score,
-                semantic.top_dense_score,
+                llm_result.is_accurate if llm_result and not llm_result.skipped else "skipped",
                 connectivity.is_connected,
                 connectivity.density_score,
             )
@@ -183,6 +187,7 @@ def run_pipeline(text: str) -> list[CitationVerdict]:
                 case_id         = citation.case_id,
                 exists          = exists,
                 semantic        = semantic,
+                llm_result      = llm_result,
                 connectivity    = connectivity,
                 verdict         = verdict,
                 context_text    = citation.context_text,
@@ -200,7 +205,6 @@ def run_pipeline(text: str) -> list[CitationVerdict]:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import json
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     sample = """
@@ -214,15 +218,16 @@ if __name__ == "__main__":
 
     results = run_pipeline(sample)
 
-    print(f"\n{'='*65}")
-    print(f"{'Citation':<25} {'Verdict':<14} {'L1':>4} {'L2':>5} {'L3':>5} {'Density':>7}")
-    print("-" * 65)
+    print(f"\n{'='*75}")
+    print(f"{'Citation':<25} {'Verdict':<14} {'L1':>4} {'L2a':>5} {'L2b':>5} {'L3':>5} {'Density':>7}")
+    print("-" * 75)
     for v in results:
-        l2 = v.semantic.is_relevant if v.semantic else "-"
-        l3 = v.connectivity.is_connected if v.connectivity else "-"
+        l2a     = v.semantic.is_relevant if v.semantic else "-"
+        l2b     = v.llm_result.is_accurate if v.llm_result and not v.llm_result.skipped else "skip"
+        l3      = v.connectivity.is_connected if v.connectivity else "-"
         density = v.connectivity.density_score if v.connectivity else "-"
         print(
             f"{v.citation_string:<25} {v.verdict:<14} "
-            f"{str(v.exists):>4} {str(l2):>5} {str(l3):>5} {str(density):>7}"
+            f"{str(v.exists):>4} {str(l2a):>5} {str(l2b):>5} {str(l3):>5} {str(density):>7}"
         )
-    print(f"{'='*65}")
+    print(f"{'='*75}")

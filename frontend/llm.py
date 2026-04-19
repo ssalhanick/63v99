@@ -73,8 +73,9 @@ def _correction_system_prompt(top_matches: list[dict]) -> str:
     return f"""You are a legal citation correction assistant for Verit, a system that \
 detects hallucinated citations in AI-generated Fourth Amendment legal text.
 
-The following are real Fourth Amendment cases from the Verit corpus that are \
-most semantically similar to the hallucinated citation's context:
+The following are real Fourth Amendment cases from the Verit corpus ranked by \
+semantic similarity to the hallucinated citation's context. Higher similarity \
+scores mean the case is a closer match to what the user likely intended:
 
 {corpus_context}
 
@@ -82,9 +83,11 @@ Suggest the single most appropriate real case from the list above as a replaceme
 for the hallucinated citation. Format your response as:
 
 Suggested replacement: [Case Name], [reporter citation if known] — [one sentence \
-explaining why this case fits the context].
+explaining why this case fits the context better than the hallucinated citation].
 
-If none of the corpus cases are a good fit, say so briefly. Do not fabricate citations."""
+Be specific about why the suggested case matches the legal context. \
+If none of the corpus cases are a good fit, say so briefly. \
+Do not fabricate citations or reporter strings."""
 
 
 # ── Streaming generators ──────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ Usage:
 
 import sys
 from pathlib import Path
+import urllib.parse
 
 # Ensure the project root (Verit/) is on sys.path so that top-level packages
 # like `visualization`, `detector`, `config`, etc. are importable when
@@ -56,9 +57,11 @@ st.markdown("""
         border-radius: 4px;
         font-size: 0.92rem;
         margin-top: 6px;
+        color: black;
     }
     .correction-box {
         background: #fff8e1;
+        color: black;
         border-left: 3px solid #f9a825;
         padding: 10px 14px;
         border-radius: 4px;
@@ -117,6 +120,7 @@ def render_citation_result(citation: dict, show_llm: bool) -> None:
     existence       = citation.get("exists", False)
     top_matches     = citation.get("top_matches", [])
     context_text    = citation.get("context_text", "")
+    llm_check       = citation.get("llm_check")
 
     emoji, color, label = VERDICT_BADGE.get(verdict, ("⚪", "gray", verdict))
 
@@ -150,20 +154,56 @@ def render_citation_result(citation: dict, show_llm: bool) -> None:
 
         st.caption("✅ Found in graph" if existence else "❌ Not found in graph")
 
-        # Top corpus matches
+        # ── Layer 2b LLM reason ───────────────────────────────────────────────
+        if llm_check and not llm_check.get("skipped"):
+            if verdict == "SUSPICIOUS":
+                st.markdown(
+                    f'<div class="correction-box">'
+                    f'⚠️ <strong>Why suspicious:</strong> {llm_check["reason"]}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            elif verdict == "REAL":
+                st.markdown(
+                    f'<div class="llm-box">'
+                    f'✅ <strong>Proposition verified:</strong> {llm_check["reason"]}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # ── Top corpus matches ────────────────────────────────────────────────
         if top_matches:
-            with st.expander(f"Top corpus matches ({len(top_matches)})"):
-                h0, h1, h2 = st.columns([4, 1.5, 1.5])
-                h0.markdown("**Case**"); h1.markdown("**RRF**"); h2.markdown("**Case ID**")
+            expander_label = (
+                f"Top corpus matches ({len(top_matches)})"
+                if verdict != "HALLUCINATED"
+                else f"📚 Closest real cases ({len(top_matches)})"
+            )
+            with st.expander(expander_label, expanded=(verdict == "HALLUCINATED")):
+                h0, h1, h2, h3 = st.columns([4, 1.5, 1.5, 1.5])
+                h0.markdown("**Case**")
+                h1.markdown("**RRF**")
+                h2.markdown("**Case ID**")
+                h3.markdown("**Source**")
                 st.divider()
                 for m in top_matches:
-                    r0, r1, r2 = st.columns([4, 1.5, 1.5])
-                    r0.markdown(f"*{m.get('case_name') or 'Unknown'}*")
-                    r1.markdown(f"`{m.get('rrf_score', 0):.4f}`")
-                    r2.markdown(f"`{m.get('case_id', '—')}`")
+                    case_id   = m.get("case_id")
+                    case_name = m.get("case_name") or "Unknown"
+                    rrf_score = m.get("rrf_score", 0)
+
+                    r0, r1, r2, r3 = st.columns([4, 1.5, 1.5, 1.5])
+                    r0.markdown(f"*{case_name}*")
+                    r1.markdown(f"`{rrf_score:.4f}`")
+                    r2.markdown(f"`{case_id or '—'}`")
+                    if case_name and case_name != "Unknown":
+                        search_query = urllib.parse.quote(case_name)
+                        cl_url = f"https://www.courtlistener.com/?q={search_query}&type=o&order_by=score+desc&stat_Published=on"
+                        r3.markdown(f"[CourtListener ↗]({cl_url})")
+                    else:
+                        r3.markdown("—")
         else:
-            with st.expander("Top corpus matches"):
-                st.caption("No matches returned.")
+            if verdict != "HALLUCINATED":
+                with st.expander("Top corpus matches"):
+                    st.caption("No matches returned.")
 
         # ── Haiku explanation ─────────────────────────────────────────────────
         if show_llm:
