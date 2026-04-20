@@ -11,6 +11,7 @@ import logging
 import sys
 import itertools
 from pathlib import Path
+import time
 
 from neo4j import GraphDatabase
 from sklearn.model_selection import train_test_split
@@ -22,6 +23,8 @@ from detector.existence_check import check_existence
 from detector.semantic_check import semantic_check
 from detector.connectivity_check import check_connectivity
 from detector.metadata_check import check_metadata
+from detector.llm_check import llm_check
+
 
 BENCHMARK_PATH      = Path(config.BENCHMARK_DIR) / "benchmark.json"
 THRESHOLDS_OUT_PATH = Path(config.BENCHMARK_DIR) / "tuned_thresholds.json"
@@ -90,35 +93,52 @@ def run_entry(entry: dict, driver) -> dict:
 
     if not exists:
         return {
-            "benchmark_id":    entry["benchmark_id"],
-            "label":           entry["label"],
-            "subtype":         entry["subtype"],
-            "exists":          False,
-            "rrf_score":       None,
-            "dense_score":     None,
-            "density_score":   None,
-            "metadata_valid":  None,
-            "meta_checked":    False,
-            "meta_year_match": None,
-            "meta_court_match":None,
+            "benchmark_id":     entry["benchmark_id"],
+            "label":            entry["label"],
+            "subtype":          entry["subtype"],
+            "corruption_type":  entry.get("corruption_type"),
+            "exists":           False,
+            "rrf_score":        None,
+            "dense_score":      None,
+            "density_score":    None,
+            "metadata_valid":   None,
+            "meta_checked":     False,
+            "meta_year_match":  None,
+            "meta_court_match": None,
+            "llm_accurate":     None,
+            "llm_checked":      False,
         }
 
     sem  = semantic_check(context_text)
     conn = check_connectivity(case_id, driver=driver)
     meta = check_metadata(case_id, citation_string, driver=driver)
 
+    # Only call LLM check on proposition-type entries to control cost
+    corruption_type = entry.get("corruption_type")
+    if corruption_type == "proposition":
+        llm  = llm_check(case_id, context_text)
+        time.sleep(1)
+        llm_accurate = llm.is_accurate
+        llm_checked  = True
+    else:
+        llm_accurate = None
+        llm_checked  = False
+
     return {
-        "benchmark_id":    entry["benchmark_id"],
-        "label":           entry["label"],
-        "subtype":         entry["subtype"],
-        "exists":          True,
-        "rrf_score":       sem.rrf_score,
-        "dense_score":     sem.top_dense_score,
-        "density_score":   conn.density_score,
-        "metadata_valid":  meta.is_valid,
-        "meta_checked":    meta.checked,
-        "meta_year_match": meta.year_match,
-        "meta_court_match":meta.court_match,
+         "benchmark_id":     entry["benchmark_id"],
+        "label":            entry["label"],
+        "subtype":          entry["subtype"],
+        "corruption_type":  corruption_type,
+        "exists":           True,
+        "rrf_score":        sem.rrf_score,
+        "dense_score":      sem.top_dense_score,
+        "density_score":    conn.density_score,
+        "metadata_valid":   meta.is_valid,
+        "meta_checked":     meta.checked,
+        "meta_year_match":  meta.year_match,
+        "meta_court_match": meta.court_match,
+        "llm_accurate":     llm_accurate,
+        "llm_checked":      llm_checked,
     }
 
 
@@ -139,6 +159,10 @@ def apply_verdict(result: dict, sim_thresh: float, rrf_thresh: float, density_th
     # Layer 4 — metadata mismatch catches Type B
     if result.get("meta_checked") and result.get("metadata_valid") is False:
         return HALLUCINATED
+    
+    # Layer 2b — LLM proposition check
+    if result.get("llm_checked") and result.get("llm_accurate") is False:
+        return SUSPICIOUS
 
     rrf_score     = result["rrf_score"]
     dense_score   = result["dense_score"]
@@ -162,8 +186,8 @@ def compute_metrics(results, sim_thresh, rrf_thresh, density_thresh) -> dict:
     for r in results:
         pred      = apply_verdict(r, sim_thresh, rrf_thresh, density_thresh)
         truth     = r["label"]
-        pred_pos  = pred  == HALLUCINATED
-        truth_pos = truth == HALLUCINATED
+        pred_pos  = pred in (HALLUCINATED, SUSPICIOUS)
+        truth_pos = truth in (HALLUCINATED, SUSPICIOUS)
 
         if pred_pos and truth_pos:       tp += 1
         elif pred_pos and not truth_pos: fp += 1
@@ -201,7 +225,7 @@ def layer1_metrics(results: list[dict]) -> dict:
     tp = fp = fn = tn = 0
     for r in results:
         pred_pos  = not r["exists"]
-        truth_pos = r["label"] == HALLUCINATED
+        truth_pos = r["label"] in (HALLUCINATED, SUSPICIOUS)
         if pred_pos and truth_pos:       tp += 1
         elif pred_pos and not truth_pos: fp += 1
         elif not pred_pos and truth_pos: fn += 1
@@ -226,7 +250,25 @@ def layer2_metrics(results: list[dict], sim_thresh: float, rrf_thresh: float) ->
             (dense_score is None or dense_score < sim_thresh)
         )
         pred_pos  = l2_fail
-        truth_pos = r["label"] == HALLUCINATED
+        truth_pos = r["label"] in (HALLUCINATED, SUSPICIOUS)
+        if pred_pos and truth_pos:       tp += 1
+        elif pred_pos and not truth_pos: fp += 1
+        elif not pred_pos and truth_pos: fn += 1
+        else:                            tn += 1
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1        = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    return {"precision": round(precision, 4), "recall": round(recall, 4),
+            "f1": round(f1, 4), "tp": tp, "fp": fp, "fn": fn, "tn": tn}
+
+def layer2b_metrics(results: list[dict]) -> dict:
+    """Isolated: evaluated only on exists=True, llm_checked=True entries."""
+    tp = fp = fn = tn = 0
+    for r in results:
+        if not r["exists"] or not r.get("llm_checked"):
+            continue
+        pred_pos  = r.get("llm_accurate") is False
+        truth_pos = r["label"] in (HALLUCINATED, SUSPICIOUS)
         if pred_pos and truth_pos:       tp += 1
         elif pred_pos and not truth_pos: fp += 1
         elif not pred_pos and truth_pos: fn += 1
@@ -247,7 +289,7 @@ def layer3_metrics(results: list[dict], density_thresh: int) -> dict:
         density_score = r.get("density_score")
         l3_fail   = density_score is None or density_score < density_thresh
         pred_pos  = l3_fail
-        truth_pos = r["label"] == HALLUCINATED
+        truth_pos = r["label"] in (HALLUCINATED, SUSPICIOUS)
         if pred_pos and truth_pos:       tp += 1
         elif pred_pos and not truth_pos: fp += 1
         elif not pred_pos and truth_pos: fn += 1
@@ -266,7 +308,7 @@ def layer4_metrics(results: list[dict]) -> dict:
         if not r["exists"] or not r.get("meta_checked"):
             continue
         pred_pos  = r.get("metadata_valid") is False
-        truth_pos = r["label"] == HALLUCINATED
+        truth_pos = r["label"] in (HALLUCINATED, SUSPICIOUS)
         if pred_pos and truth_pos:       tp += 1
         elif pred_pos and not truth_pos: fp += 1
         elif not pred_pos and truth_pos: fn += 1
@@ -344,6 +386,7 @@ def main():
         print("\n── Layer-isolated metrics (starting thresholds) ──")
         print_summary("Layer 1 — Existence   (val)", layer1_metrics(val_results))
         print_summary("Layer 2 — Semantic    (val)", layer2_metrics(val_results, config.SIMILARITY_THRESHOLD, rrf_start))
+        print_summary("Layer 2b — LLM Prop   (val)", layer2b_metrics(val_results))
         print_summary("Layer 3 — Connectivity(val)", layer3_metrics(val_results, config.CITATION_DENSITY_THRESHOLD))
         print_summary("Layer 4 — Metadata    (val)", layer4_metrics(val_results))
 

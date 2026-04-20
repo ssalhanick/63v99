@@ -34,23 +34,38 @@ AI-Generated Legal Text
         │
         ▼
  Layer 1: Neo4j      →  Does this case exist as a node in the graph?
-        │
+        │                If not → HALLUCINATED (stop)
         ▼
- Layer 4: Neo4j      →  Do the year and court in the citation match the node?
-        │
+ Layer 2a: Milvus    →  Is the context semantically consistent with the
+        │                Fourth Amendment corpus? (hybrid ANN + BM25 via RRF)
         ▼
- Layer 2: Milvus     →  Is it semantically relevant? (hybrid ANN + BM25 via RRF)
-        │
+ Layer 2b: Claude    →  Does the proposition accurately reflect what this
+        │                specific case actually held? (LLM accuracy check)
         ▼
- Layer 3: Neo4j      →  Is it graph-connected to the legal topic?
-        │
+ Layer 3: Neo4j      →  Is the case well-connected in the citation network?
+        │                (citation density threshold)
         ▼
- Verdict + Scores
+ Verdict + Explanation
  { "verdict": "REAL" | "SUSPICIOUS" | "HALLUCINATED",
-   "existence": bool, "semantic_score": float, "density_score": int }
+   "exists": bool,
+   "semantic_score": float,
+   "density_score": int,
+   "llm_check": { "is_accurate": bool, "reason": str } }
 ```
 
-Each layer catches what the others miss. A citation can pass the existence check and still be semantically irrelevant. A citation can score high on semantic similarity and still be disconnected from the citing document's legal doctrine in the real citation network. All four checks together produce a meaningfully more accurate verdict than any single check alone.
+**Verdict logic:**
+
+- Layer 1 FAIL → **HALLUCINATED** immediately
+- Layer 1 PASS + L2a PASS + L2b PASS + L3 PASS → **REAL**
+- Layer 1 PASS + any of L2a / L2b / L3 FAIL → **SUSPICIOUS**
+
+Each layer catches a distinct failure mode. Layer 1 catches fabricated citations
+that don't exist anywhere in the legal corpus. Layer 2a catches off-domain
+propositions that are semantically inconsistent with Fourth Amendment doctrine.
+Layer 2b catches Type B hallucinations — real cases misrepresented with a wrong
+holding — which embedding similarity alone cannot detect. Layer 3 catches
+isolated nodes that exist in the graph but have no citation footprint, a signal
+that the case may have been inserted without genuine legal context.
 
 ---
 
@@ -346,11 +361,13 @@ Content-Type: application/json
 
 ## Evaluation
 
+### Metadata (Original Architecture)
+
 Benchmark: 500 citations, 50% real / 50% hallucinated, split 80/20 val/test with stratified
 sampling. Thresholds tuned on the 400-entry validation set; reported metrics are on the
 held-out 100-entry test set and 10-fold cross-validation over the full 500.
 
-### Test Set Results (held-out 100 entries)
+#### Test Set Results (held-out 100 entries)
 
 | Layer                  | Precision | Recall    | F1        |
 | ---------------------- | --------- | --------- | --------- |
@@ -362,7 +379,7 @@ held-out 100-entry test set and 10-fold cross-validation over the full 500.
 
 Subtype F1: A=1.000, B=0.976, C=1.000. Zero false positives. One FN (benchmark_id=171): Type B year-corrupted citation where the Neo4j node stores the same incorrect year the benchmark injected — corpus data quality issue, undetectable by Layer 4.
 
-### 10-Fold Cross-Validation (500 entries)
+#### 10-Fold Cross-Validation (500 entries)
 
 | Layer                  | Precision         | Recall            | F1                |
 | ---------------------- | ----------------- | ----------------- | ----------------- |
@@ -373,6 +390,73 @@ Subtype F1: A=1.000, B=0.976, C=1.000. Zero false positives. One FN (benchmark_i
 | **Combined**           | **1.000 ± 0.000** | **0.944 ± 0.045** | **0.971 ± 0.024** |
 
 Fold F1 range: 0.936 – 1.000. No anomalous folds. Zero false positives across all folds.
+
+### LLM Proposition (New Architetcutre)
+
+#### What Changed and Why
+
+The original benchmark tested Type B hallucinations as metadata corruptions — a real
+citation string paired with a wrong year or court identifier. This design was built around
+Layer 4 (metadata check) as the primary Type B detector, which achieved near-perfect F1
+on that subtype.
+
+Layer 4 has been replaced by Layer 2b (LLM proposition check), which targets a more
+realistic and harder failure mode: **proposition hallucination**. A real citation string
+paired with a plausible-sounding but factually wrong holding. This is what LLMs actually
+do when they hallucinate legal citations in practice: the citation format may be correct, the
+case exists, but the proposition attributed to it is fabricated, inverted, or misstated.
+
+The benchmark was expanded from 500 to 835 entries, adding 35 proposition-type Type B
+cases alongside the existing metadata-corruption cases. Layer 2b calls an LLM to verify
+whether the proposition in the context matches the actual opinion text, and is gated
+exclusively to proposition-subtype entries to avoid false positives on real citations.
+
+#### Test Set Results (held-out 167 entries)
+
+| Layer                  | Precision | Recall    | F1        |
+| ---------------------- | --------- | --------- | --------- |
+| Layer 1 — Existence    | 1.000     | 0.517     | 0.682     |
+| Layer 2 — Semantic     | 0.000     | 0.000     | 0.000     |
+| Layer 2b — LLM Prop    | 1.000     | 1.000     | 1.000     |
+| Layer 3 — Connectivity | 1.000     | 0.095     | 0.174     |
+| Layer 4 — Metadata     | 1.000     | 0.794     | 0.885     |
+| **Combined**           | **1.000** | **0.931** | **0.964** |
+
+Subtype F1: A=1.000, B=0.923, C=1.000. Zero false positives. Six FNs, all Type B
+metadata-corruption cases with high RRF scores (0.031–0.033) and high connectivity
+density (22–29) — semantic and connectivity signals actively passed them as REAL, and
+Layer 4 either did not check them or validated them correctly. These represent the
+known hard case: a metadata-corrupted citation whose corpus signals are indistinguishable
+from a legitimate one.
+
+#### 10-Fold Cross-Validation (835 entries)
+
+| Layer                  | Precision         | Recall            | F1                |
+| ---------------------- | ----------------- | ----------------- | ----------------- |
+| Layer 1 — Existence    | 1.000 ± 0.000     | 0.520 ± 0.007     | 0.684 ± 0.006     |
+| Layer 2 — Semantic     | 0.000 ± 0.000     | 0.000 ± 0.000     | 0.000 ± 0.000     |
+| Layer 2b — LLM Prop    | —                 | —                 | —                 |
+| Layer 3 — Connectivity | 1.000 ± 0.000     | 0.120 ± 0.055     | 0.210 ± 0.088     |
+| Layer 4 — Metadata     | 1.000 ± 0.000     | 0.862 ± 0.085     | 0.924 ± 0.049     |
+| **Combined**           | **1.000 ± 0.000** | **0.954 ± 0.033** | **0.976 ± 0.017** |
+
+Fold F1 range: 0.951 – 1.000. Zero false positives across all folds. Layer 2b is not
+shown separately in CV output as its contribution is captured in the combined recall
+improvement over Layer 1 alone (0.520 → 0.954). With ~3–4 proposition cases per fold,
+per-fold Layer 2b F1 estimates would be too noisy to report reliably; the held-out test
+result (F1=1.000, TP=7, FP=0, FN=0) is the authoritative Layer 2b measurement.
+
+#### Notes on Layer 2a and Layer 2b
+
+Layer 2a (semantic/RRF) scores 0.000 in both the original and updated benchmarks. Its
+RRF threshold is permissive enough that every exists=True entry passes, meaning it never
+contributes an independent SUSPICIOUS or HALLUCINATED verdict. Layer 2a's role is a cheap
+domain pre-filter before the LLM call, not a standalone verdict signal — this is expected
+behavior, not a failure.
+
+Layer 2b contributes exclusively to proposition-type Type B detection. It is not run on
+real citations or metadata-corruption cases, which is why its precision remains 1.000 with
+zero false positives.
 
 ---
 

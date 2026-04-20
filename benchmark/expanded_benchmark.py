@@ -337,6 +337,115 @@ def build_type_b_expansion(
     save_checkpoint(records, CKPT_B_EXP)
     return records
 
+# ── Type B (proposition) expansion ───────────────────────────────────────────
+
+CKPT_B_PROP_EXP = Path(BENCHMARK_DIR) / "expand_checkpoint_type_b_proposition.json"
+
+TYPE_B_PROP_PROMPT = """You are building a legal hallucination detection benchmark.
+
+You will be given a real Fourth Amendment case citation and an excerpt from the opinion.
+Your job is to write a plausible-sounding but factually WRONG proposition for this case.
+
+Citation: {citation}
+
+Opinion excerpt:
+{excerpt}
+
+Write a context paragraph (3-5 sentences) that:
+- Cites this exact citation string naturally (as a real legal brief would)
+- Uses correct legal vocabulary and sounds authoritative
+- But materially misstates the holding — do one of:
+    * Reverse the ruling (held constitutional → held unconstitutional, or vice versa)
+    * Attribute a different legal standard (e.g. say "probable cause" when it was "reasonable suspicion")
+    * Describe facts or a procedural outcome not present in the opinion
+
+Return ONLY a JSON object, no preamble or markdown:
+{{"citation": "{citation}", "context": "<wrong proposition paragraph>"}}
+"""
+
+def build_type_b_proposition_expansion(
+    client: anthropic.Anthropic,
+    df: pd.DataFrame,
+    target: int,
+    seen_citations: set[str],
+) -> list[dict]:
+    ckpt = load_checkpoint(CKPT_B_PROP_EXP)
+    if ckpt is not None:
+        return ckpt
+
+    print(f"\n[Type B-Prop] Generating {target} proposition-hallucinated citations...")
+
+    # Seed cases from context doc — high connectivity, easy to verify real holding
+    PRIORITY_CITATIONS = {
+        "92 F.4th 1279",
+        "33 F.4th 296",
+        "157 N.E.3d 406",
+        "232 N.E.3d 419",
+        "392 U.S. 1",
+        "389 U.S. 347",
+    }
+
+    pool = df.sample(min(len(df), target * 25), random_state=13).reset_index(drop=True)
+    records = []
+    local_seen = set(seen_citations)
+
+    for _, row in pool.iterrows():
+        if len(records) >= target:
+            break
+
+        citations = extract_citations_from_text(row["plain_text"])
+
+        for cit in citations:
+            if len(records) >= target:
+                break
+
+            cs = cit["citation_string"]
+
+            if not is_clean_reporter_citation(cs):
+                continue
+            if cs in local_seen:
+                continue
+
+            # Pull excerpt — first 1500 chars of plain_text as holding context
+            excerpt = row["plain_text"][:1500].strip()
+            if not excerpt:
+                continue
+
+            prompt = TYPE_B_PROP_PROMPT.format(
+                citation=cs,
+                excerpt=excerpt,
+            )
+
+            try:
+                raw = call_claude(client, prompt)
+                parsed = parse_json_from_response(raw)
+                # parse_json_from_response returns list — handle both list and dict
+                if isinstance(parsed, list):
+                    parsed = parsed[0]
+                wrong_context = parsed.get("context", "").strip()
+            except Exception as e:
+                print(f"  [Type B-Prop] API/parse error for {cs}: {e}")
+                continue
+
+            if not wrong_context:
+                continue
+
+            local_seen.add(cs)
+            records.append({
+                "citation":        cs,          # bare reporter string — no corruption
+                "context":         wrong_context,
+                "label":           "SUSPICIOUS",
+                "subtype":         "B",
+                "case_id":         int(row["case_id"]),
+                "court_id":        row["court_id"],
+                "year":            row["year"],
+                "corruption_type": "proposition",
+            })
+            print(f"  [Type B-Prop] {len(records):>3}/{target}  {cs}")
+
+    print(f"[Type B-Prop] Generated {len(records)} proposition-hallucinated citations.")
+    save_checkpoint(records, CKPT_B_PROP_EXP)
+    return records
 
 # ── Type C expansion ──────────────────────────────────────────────────────────
 
@@ -422,10 +531,11 @@ def main():
     # ── Generate new entries ──────────────────────────────────────────────────
     new_real   = build_real_expansion(df, NEW_REAL,   seen_citations)
     new_type_a = build_type_a_expansion(client, NEW_TYPE_A, seen_citations)
-    new_type_b = build_type_b_expansion(df, NEW_TYPE_B, seen_citations)
+    new_type_b_meta = build_type_b_expansion(df, NEW_TYPE_B, seen_citations)
+    new_type_b_prop = build_type_b_proposition_expansion(client, df, NEW_TYPE_B//2, seen_citations)
     new_type_c = build_type_c_expansion(client, NEW_TYPE_C, seen_citations)
 
-    new_entries = new_real + new_type_a + new_type_b + new_type_c
+    new_entries = new_real + new_type_a + new_type_b_meta + new_type_b_prop + new_type_c
     random.shuffle(new_entries)
 
     # ── Merge with existing ───────────────────────────────────────────────────

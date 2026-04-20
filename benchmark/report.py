@@ -25,6 +25,7 @@ from benchmark.evaluate import (
     compute_metrics,
     layer1_metrics,
     layer2_metrics,
+    layer2b_metrics,
     layer3_metrics,
     layer4_metrics,
     print_summary,
@@ -114,7 +115,7 @@ def false_positive_analysis(rows: list[dict]) -> list[dict]:
     ]
 
 
-def print_full_report(thresholds, l1, l2, l3, l4, combined, suspicious, fn_list, fp_list, n_test):
+def print_full_report(thresholds, l1, l2, l2b, l3, l4, combined, suspicious, fn_list, fp_list, n_test):
     bar = "=" * 60
     print(f"\n{bar}")
     print(f"  VERIT — WEEK 8 EVALUATION REPORT")
@@ -127,6 +128,7 @@ def print_full_report(thresholds, l1, l2, l3, l4, combined, suspicious, fn_list,
 
     print_summary("Layer 1 — Existence     (test)", l1)
     print_summary("Layer 2 — Semantic      (test)", l2)
+    print_summary("Layer 2b — LLM Context  (test)", l2b)
     print_summary("Layer 3 — Connectivity  (test)", l3)
     print_summary("Layer 4 — Metadata      (test)", l4)
     print_summary("Combined pipeline       (test)", combined)
@@ -177,6 +179,7 @@ def main():
 
     l1       = layer1_metrics(test_results)
     l2       = layer2_metrics(test_results, sim, rrf)
+    l2b      = layer2b_metrics(test_results)
     l3       = layer3_metrics(test_results, density)
     l4       = layer4_metrics(test_results)
     combined = compute_metrics(test_results, sim, rrf, density)
@@ -187,7 +190,7 @@ def main():
     fp_list    = false_positive_analysis(rows)
 
     print_full_report(
-        thresholds, l1, l2, l3, l4, combined,
+        thresholds, l1, l2, l2b, l3, l4, combined,
         suspicious, fn_list, fp_list, n_test=len(test),
     )
 
@@ -199,7 +202,7 @@ def main():
             "rrf_threshold":     rrf,
             "density_threshold": density,
         },
-        "layer_metrics": {"layer1": l1, "layer2": l2, "layer3": l3, "layer4": l4},
+        "layer_metrics": {"layer1": l1, "layer2": l2, "layer2b": l2b, "layer3": l3, "layer4": l4},
         "combined_metrics":     combined,
         "suspicious_breakdown": suspicious,
         "false_negatives":      fn_list,
@@ -207,7 +210,7 @@ def main():
         "per_entry":            rows,
     }
 
-    with open(REPORT_OUT_PATH, "w") as f:
+    with open(REPORT_OUT_PATH, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     logger.info("Report saved → %s", REPORT_OUT_PATH)
 
