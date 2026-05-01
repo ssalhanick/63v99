@@ -458,6 +458,16 @@ Layer 2b contributes exclusively to proposition-type Type B detection. It is not
 real citations or metadata-corruption cases, which is why its precision remains 1.000 with
 zero false positives.
 
+### Train Score Updated Tests (167 Entries)
+| Layer                  | Precision         | Recall            | F1                | Accuracy     |
+| ---------------------- | ----------------- | ----------------- | ----------------- | ------------ |
+| Layer 1 — Existence    | 1.000             | 0.5172            | 0.6818            |
+| Layer 2 — Semantic     | 0.000             | 0.000             | 0.000             |
+| Layer 2b — LLM Prop    | 1.000             | 1.000             | 1.000             |
+| Layer 3 — Connectivity | 1.000             | 0.0952            | 0.1739            |
+| Layer 4 — Metadata     | 1.000             | 0.7941            | 0.8852            |
+| **Combined**           | **1.000**         | **0.9310**        | **0.9643**        | **0.9641**
+
 ---
 
 ## Development Timeline
@@ -1197,6 +1207,202 @@ Known limitations:
 - 369 cases missing citation strings (non-standard reporters, not fixable)
 - HALLUCINATED top_matches empty — Layer 1 short-circuit skips semantic search
 - Terry v. Ohio density=0 due to corpus coverage (SCOTUS vs state court corpus)
+
+
+---
+
+### Phase 1 - Zero-Infrastructure Signal Improvements
+
+#### Step 1.1 - Wire Layer 4 into Production Pipeline
+
+- Updated `detector/pipeline.py` - Layer 4 (`metadata_check`) now runs immediately
+  after Layer 1 passes, before Layer 2a (semantic) and Layer 2b (LLM).
+  Type B hallucinations (real case, wrong year/court) are caught at L4 and
+  short-circuit to HALLUCINATED without consuming any Haiku API tokens.
+- Updated `detector/pipeline.py` - `CitationVerdict` dataclass gains two new fields:
+  `metadata: Optional[MetadataResult]` and `name_check: Optional[NameCheckResult]`
+- Cost impact: LLM calls per benchmark run drop from ~609 to ~400 (Type B entries
+  never reach L2b), reducing per-run Haiku cost from ~$1.93 to ~$1.27
+
+#### Step 1.2 - Fix BM25 Query Tokenization
+
+- Updated `config.py` - `LEGAL_PRESERVE` moved here as the single source of truth;
+  also added `NAME_SCORE_THRESHOLD` and `SCORER_PATH` constants for later phases
+- Updated `preprocessing/tokenize_bm25.py` - now imports `LEGAL_PRESERVE` from
+  config instead of defining it locally
+- Updated `detector/semantic_check.py` - replaced bare regex query tokenizer with
+  a spaCy lemmatization pipeline (`en_core_web_sm`, parser+ner disabled) that matches
+  the corpus tokenization exactly. Fixes vocabulary mismatch where surface forms like
+  'searches' did not match corpus tokens lemmatized to 'search'. Legal terms in
+  `LEGAL_PRESERVE` preserved even when spaCy marks them as stopwords.
+
+#### Step 1.3 - Party Name Consistency Check
+
+- Added `detector/name_check.py` - new module using `rapidfuzz.fuzz.token_sort_ratio`
+  to compare party names in the citation string against the case name on the Neo4j node.
+  Score below `NAME_SCORE_THRESHOLD` (0.70) contributes a SUSPICIOUS signal.
+  Pure reporter citations ('392 U.S. 1') are skipped gracefully.
+- Updated `detector/existence_check.py` - `check_existence()` now returns a
+  `(bool, Optional[str])` tuple, fetching `c.name` in the same Cypher round trip.
+- Updated `detector/pipeline.py` - name check runs alongside L4 for every citation
+  that passes Layer 1. Name score logged in the per-citation verdict line.
+- Added `rapidFuzz>=3.0` to `requirements.txt`; installed `rapidfuzz-3.14.5`
+
+
+---
+
+### Phase 2 - Data Model and API Layer
+
+#### Step 2.1 - Store case_sim in SemanticResult
+
+- Updated `detector/semantic_check.py` - added `case_sim: float | None` field to
+  `SemanticResult` dataclass. The case-specific cosine similarity was already computed
+  inside `semantic_check()` but discarded. It is now returned so the pipeline, API,
+  and future learned scorer can consume it as a feature signal.
+
+#### Step 2.2 - Expose Raw Scores in API Response
+
+- Updated `api/main.py` - added `ConfidenceSignals` Pydantic model surfacing all
+  per-layer raw scores in the `/check-citation` response:
+  `rrf_score`, `dense_score`, `case_sim`, `density_score`, `metadata_valid`,
+  `name_score`, `temporal_valid`, `temporal_reason`.
+- `CitationResult` extended with `confidence_signals: Optional[ConfidenceSignals]`
+  field. Backward-compatible - existing `semantic_score`, `dense_score`, and
+  `density_score` top-level fields are preserved.
+
+#### Step 2.3 - Temporal Precedential Logic
+
+- Added `detector/temporal_check.py` - two lightweight temporal sanity checks:
+  (1) **Future-citation check**: if the year in the citation string is after the
+  current year, flag SUSPICIOUS.
+  (2) **Year-inversion check**: if the citation year pre-dates the year the case was
+  actually decided (stored on Neo4j Case node), flag SUSPICIOUS.
+  Both checks reuse `MetadataResult.cited_year` and `MetadataResult.actual_year`
+  already fetched by Layer 4 - no additional database round trips.
+- Updated `detector/pipeline.py` - `TemporalResult` added to `CitationVerdict`;
+  `check_temporal()` called after L4 for every citation that passes L1;
+  temporal validity factored into `_compute_verdict()` as a SUSPICIOUS signal;
+  temporal reason logged in the per-citation verdict line.
+
+
+---
+
+### Phase 3 - Learned Calibrated Scorer
+
+#### Step 3.1a - Instrument evaluate.py to Log Raw Scores
+
+- Updated `benchmark/evaluate.py` - fixed broken `check_existence` call
+  (now correctly unpacks the `(bool, Optional[str])` tuple added in Phase 1).
+- Added `name_check` and `temporal_check` imports and calls to `run_entry()`,
+  bringing the benchmark in sync with the production pipeline.
+- Extended result dict with new fields: `case_sim`, `name_score`, `name_checked`,
+  `temporal_valid`, `temporal_checked`, `temporal_reason`.
+- Added `_write_raw_scores()` function that writes `benchmark/raw_scores.csv`
+  after each inference run. CSV contains all 8 feature signals per entry and
+  serves as the training data for the learned scorer.
+
+#### Step 3.1c - Train Logistic Regression Scorer
+
+- Added `benchmark/train_scorer.py` - reads `raw_scores.csv`, builds an 8-feature
+  matrix (exists, rrf_score, dense_score, case_sim, density_score, metadata_valid,
+  name_score, temporal_valid), trains a `class_weight=balanced` logistic regression
+  with 5-fold stratified CV AUC reporting, prints feature weights and probability
+  calibration buckets, and saves `benchmark/scorer.pkl`.
+
+#### Step 3.1d - Replace _compute_verdict() with Learned Scorer
+
+- Updated `detector/pipeline.py` - `_compute_verdict()` now loads `scorer.pkl`
+  on first call (lazy singleton) and uses `predict_proba()` to compute
+  `P(hallucinated)` from the 8-signal feature vector.
+  Thresholds: P >= 0.70 => HALLUCINATED, P >= 0.40 => SUSPICIOUS, else REAL.
+  Hard rules (L1 FAIL, L4 FAIL => HALLUCINATED) always applied before the scorer.
+  Graceful boolean fallback if `scorer.pkl` is not yet present, ensuring the
+  pipeline remains functional before training data is generated.
+
+To activate the scorer, run in order:
+  1. `python -m benchmark.evaluate`  (generates raw_scores.csv)
+  2. `python -m benchmark.train_scorer`  (trains and saves scorer.pkl)
+
+---
+
+### Phase 4 — Graph Analysis Layer
+
+#### Step 4.1 — PageRank Authority Weighting
+
+- Added `db/compute_pagerank.py` — projects the `Case→CITES` graph into the
+  Neo4j GDS in-memory store, runs PageRank (damping=0.85, maxIterations=20),
+  writes scores back to Case nodes as the `pagerank` property, then drops the
+  GDS projection to free memory. Fully idempotent (re-runnable after graph updates).
+  Run once before retraining: `python -m db.compute_pagerank`
+- Updated `detector/connectivity_check.py` — `ConnectivityResult` gains a new
+  `pagerank_score: Optional[float]` field. `check_connectivity()` fetches both
+  `density` and `c.pagerank` in a single Cypher round-trip (no extra query).
+  Returns `None` if PageRank has not yet been computed.
+- Updated `detector/pipeline.py` — `_compute_verdict()` passes `pagerank_score`
+  as the 6th element of the scorer feature vector. A backward-compat guard trims
+  the vector to the stored model's expected width when loading a Phase 3 pkl.
+- Updated `benchmark/evaluate.py` — `run_entry()` now logs `pagerank_score` from
+  `ConnectivityResult` into `raw_scores.csv`. `_write_raw_scores()` field list
+  updated to include `pagerank_score` between `density_score` and `metadata_valid`.
+- Updated `benchmark/train_scorer.py` — `FEATURES` list and `X_df` builder include
+  `pagerank_score` (filled with 0.0 when missing — conservative lower bound).
+- Updated `config.py` — added `GDS_GRAPH_NAME = "verit-case-graph"` as a single
+  source of truth for all GDS projection commands.
+- Updated `api/main.py` — `ConfidenceSignals` gains `pagerank_score: Optional[float]`;
+  populated from `v.connectivity.pagerank_score` in `_verdict_to_response()`.
+
+To activate PageRank scoring:
+  1. `python -m db.compute_pagerank`        (writes pagerank to Neo4j)
+  2. `python -m benchmark.evaluate`          (regenerates raw_scores.csv with pagerank)
+  3. `python -m benchmark.train_scorer`      (retrains scorer.pkl with 9 features)
+
+#### Step 4.2 — Cross-Citation Jaccard Similarity
+
+- Added `detector/cross_citation.py` — new module providing pairwise citation-graph
+  analysis for all confirmed-real citations in a single document.
+  `compute_jaccard_pairs()` queries Neo4j for the intersection and union of outbound
+  citation neighbourhoods for each pair (A, B) using a single Cypher traversal.
+  Returns Jaccard ∈ [0, 1]: high → cases are from the same legal neighbourhood;
+  near-zero → potential doctrinal incoherence signal.
+- Updated `detector/pipeline.py` — after the per-citation loop, collects all
+  `case_id`s that passed Layer 1, opens a fresh driver, calls
+  `compute_cross_citation_signals()`, then stamps each `CitationVerdict` with its
+  `cross_jaccard_score: Optional[float]`.
+- Updated `detector/pipeline.py` — `CitationVerdict` dataclass gains two new
+  optional fields: `cross_jaccard_score` and `min_hop_distance` (default `None`).
+- Updated `api/main.py` — `ConfidenceSignals` gains `cross_jaccard_score: Optional[float]`
+  and `min_hop_distance: Optional[int]`; both populated in `_verdict_to_response()`.
+
+#### Step 4.3 — Co-Citation Shortest Path
+
+- Extended `detector/cross_citation.py` — `compute_shortest_paths()` runs
+  `shortestPath((a)-[:CITES*..5]-(b))` for each pair, returning hop count or
+  `None` if no path within 5 hops. Per-node `min_hop_distance` is the minimum
+  across all pairs in the document.
+- `CrossCitationSignal` dataclass exposes both `mean_jaccard` and `min_hop_distance`
+  together with `pair_count` for diagnostics.
+- `compute_cross_citation_signals()` (the pipeline entry-point aggregator) runs
+  both Jaccard and shortest-path queries per pair in a single database session,
+  accumulating per-node running averages and minimums.
+
+---
+
+### Phase 5 — Major Infrastructure Rebuild
+
+#### Step 5.1 — Chunk-Level Milvus Reindex
+- Updated `embeddings/embed_cases.py` to support exporting embeddings per paragraph chunk instead of mean-pooling per case.
+- Updated `embeddings/milvus_index.py` to support `chunk_index` in the Milvus schema.
+- Updated `detector/semantic_check.py` to aggregate chunk-level ANN hits dynamically using max-pooling.
+
+#### Step 5.2 — Circuit-Aware Retrieval
+- Updated `api/main.py` to accept an optional `jurisdiction` parameter in the payload.
+- Updated `detector/semantic_check.py` to dynamically apply a post-search court filter to both dense and sparse hits.
+
+#### Step 5.3 — Doctrine Node Ontology
+- Added `preprocessing/classify_doctrines.py` to classify text against Fourth Amendment concept keywords.
+- Added `db/load_doctrines.py` to push `[:APPLIES_DOCTRINE]` relationships to `:Doctrine` nodes in Neo4j.
+- Added `detector/doctrine_check.py` to expose `has_doctrines` and `mean_shared_doctrines` for cross-citation coherence.
+- Updated `api/main.py` and `detector/pipeline.py` to expose these new doctrine signals.
 
 ## Acknowledgements
 

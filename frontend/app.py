@@ -88,8 +88,11 @@ def _load_umap():
 
 # ── API helper ────────────────────────────────────────────────────────────────
 
-def call_api(text: str) -> dict:
-    response = requests.post(API_URL, json={"text": text}, timeout=REQUEST_TIMEOUT)
+def call_api(text: str, jurisdiction: str = None) -> dict:
+    payload = {"text": text}
+    if jurisdiction and jurisdiction != "All":
+        payload["jurisdiction"] = jurisdiction
+    response = requests.post(API_URL, json=payload, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
 
@@ -125,7 +128,7 @@ def render_citation_result(citation: dict, show_llm: bool) -> None:
     emoji, color, label = VERDICT_BADGE.get(verdict, ("⚪", "gray", verdict))
 
     with st.container():
-        col_v, col_c, col_s, col_d = st.columns([1.5, 4, 1.5, 1.5])
+        col_v, col_c, col_s, col_d, col_docs = st.columns([1.5, 3, 1.2, 1.2, 1.5])
 
         with col_v:
             st.markdown(
@@ -150,6 +153,16 @@ def render_citation_result(citation: dict, show_llm: bool) -> None:
             st.metric(
                 label="Density",
                 value=int(density_score) if density_score is not None else "—",
+            )
+            
+        with col_docs:
+            signals = citation.get("confidence_signals") or {}
+            has_docs = signals.get("has_doctrines")
+            shared = signals.get("mean_shared_doctrines")
+            val = f"{shared:.1f}" if shared is not None else ("Yes" if has_docs else "No")
+            st.metric(
+                label="Doctrines",
+                value=val if has_docs is not None else "—",
             )
 
         st.caption("✅ Found in graph" if existence else "❌ Not found in graph")
@@ -258,7 +271,14 @@ with tab_checker:
         label_visibility="collapsed",
     )
 
-    col_btn, col_toggle = st.columns([3, 1])
+    col_jur, col_btn, col_toggle = st.columns([1, 2, 1])
+    with col_jur:
+        jurisdiction = st.selectbox(
+            "Jurisdiction Filter",
+            options=["All", "ohioctapp", "indctapp", "tenncrimapp", "ncctapp"],
+            index=0,
+            label_visibility="collapsed"
+        )
     with col_btn:
         check_button = st.button("🔍 Check Citations", type="primary", use_container_width=True)
     with col_toggle:
@@ -272,7 +292,7 @@ with tab_checker:
         else:
             with st.spinner("Running citation checks..."):
                 try:
-                    result    = call_api(input_text)
+                    result    = call_api(input_text, jurisdiction)
                     citations = result.get("citations", [])
                 except requests.exceptions.ConnectionError:
                     st.error("Cannot connect to the Verit API. Make sure FastAPI is running on localhost:8000.")
@@ -295,11 +315,12 @@ with tab_checker:
                 st.subheader("Citation Details")
 
                 # Column headers
-                h1, h2, h3, h4 = st.columns([1.5, 4, 1.5, 1.5])
+                h1, h2, h3, h4, h5 = st.columns([1.5, 3, 1.2, 1.2, 1.5])
                 h1.markdown("**Verdict**")
                 h2.markdown("**Citation**")
                 h3.markdown("**Semantic**")
                 h4.markdown("**Density**")
+                h5.markdown("**Doctrines**")
                 st.divider()
 
                 for citation in citations:

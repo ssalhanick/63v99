@@ -64,6 +64,7 @@ app.add_middleware(
 
 class CheckCitationRequest(BaseModel):
     text: str
+    jurisdiction: Optional[str] = None
 
     class Config:
         json_schema_extra = {
@@ -71,7 +72,8 @@ class CheckCitationRequest(BaseModel):
                 "text": (
                     "In Terry v. Ohio, 392 U.S. 1 (1968), the Court held that "
                     "a brief investigatory stop requires reasonable articulable suspicion."
-                )
+                ),
+                "jurisdiction": "ca9"
             }
         }
 
@@ -92,16 +94,34 @@ class LLMCheckResult(BaseModel):
     tokens_used:  int
     skipped:      bool
 
+class ConfidenceSignals(BaseModel):
+    """Raw per-layer scores surfaced for frontend display and downstream tooling."""
+    rrf_score:          Optional[float]   # BM25+dense fusion score (Layer 2a)
+    dense_score:        Optional[float]   # top cosine similarity hit (Layer 2a)
+    case_sim:           Optional[float]   # cosine sim vs. this specific case (Layer 2a)
+    density_score:      Optional[int]     # citation network density (Layer 3)
+    pagerank_score:     Optional[float]   # GDS PageRank authority score (Phase 4.1)
+    metadata_valid:     Optional[bool]    # year + court match (Layer 4)
+    name_score:         Optional[float]   # party name fuzzy match (Step 1.3)
+    temporal_valid:     Optional[bool]    # year inversion / future citation (Step 2.3)
+    temporal_reason:    Optional[str]     # "future_citation" | "year_inversion" | None
+    cross_jaccard_score: Optional[float]  # mean Jaccard vs. co-citations (Phase 4.2)
+    min_hop_distance:   Optional[int]     # shortest CITES path to co-citation (Phase 4.3)
+    has_doctrines:      Optional[bool]    # has >= 1 doctrine label (Phase 5.3)
+    mean_shared_doctrines: Optional[float] # mean shared doctrines with co-citations (Phase 5.3)
+
+
 class CitationResult(BaseModel):
     citation_string: str
     case_name:       Optional[str]
     case_id:         Optional[int]
     verdict:         str
     exists:          bool
-    semantic_score:  Optional[float]
-    dense_score:     Optional[float]
-    density_score:   Optional[int]
-    llm_check:       Optional[LLMCheckResult]   # NEW
+    semantic_score:  Optional[float]            # kept for backward compat
+    dense_score:     Optional[float]            # kept for backward compat
+    density_score:   Optional[int]              # kept for backward compat
+    llm_check:       Optional[LLMCheckResult]
+    confidence_signals: Optional[ConfidenceSignals]  # NEW — full signal breakdown
     top_matches:     list[TopMatch]
 
 
@@ -139,17 +159,35 @@ def _verdict_to_response(v: CitationVerdict) -> CitationResult:
             skipped     = v.llm_result.skipped,
         )
 
+    # Build confidence_signals from all available layer results
+    signals = ConfidenceSignals(
+        rrf_score            = v.semantic.rrf_score          if v.semantic      else None,
+        dense_score          = v.semantic.top_dense_score    if v.semantic      else None,
+        case_sim             = v.semantic.case_sim           if v.semantic      else None,
+        density_score        = v.connectivity.density_score  if v.connectivity  else None,
+        pagerank_score       = v.connectivity.pagerank_score if v.connectivity  else None,
+        metadata_valid       = v.metadata.is_valid           if v.metadata and v.metadata.checked else None,
+        name_score           = v.name_check.score            if v.name_check and v.name_check.checked else None,
+        temporal_valid       = v.temporal.is_valid           if v.temporal and v.temporal.checked else None,
+        temporal_reason      = v.temporal.reason             if v.temporal and v.temporal.checked else None,
+        cross_jaccard_score  = v.cross_jaccard_score,
+        min_hop_distance     = v.min_hop_distance,
+        has_doctrines        = v.has_doctrines,
+        mean_shared_doctrines= v.mean_shared_doctrines,
+    )
+
     return CitationResult(
-        citation_string = v.citation_string,
-        case_name       = v.case_name,
-        case_id         = v.case_id,
-        verdict         = v.verdict,
-        exists          = v.exists,
-        semantic_score  = v.semantic.rrf_score        if v.semantic      else None,
-        dense_score     = v.semantic.top_dense_score  if v.semantic      else None,
-        density_score   = v.connectivity.density_score if v.connectivity else None,
-        llm_check       = llm_check_result,
-        top_matches     = top_matches,
+        citation_string    = v.citation_string,
+        case_name          = v.case_name,
+        case_id            = v.case_id,
+        verdict            = v.verdict,
+        exists             = v.exists,
+        semantic_score     = v.semantic.rrf_score        if v.semantic      else None,
+        dense_score        = v.semantic.top_dense_score  if v.semantic      else None,
+        density_score      = v.connectivity.density_score if v.connectivity else None,
+        llm_check          = llm_check_result,
+        confidence_signals = signals,
+        top_matches        = top_matches,
     )
 
 
@@ -183,7 +221,8 @@ def check_citation(request: CheckCitationRequest):
     logger.info("Received /check-citation request (%d chars)", len(request.text))
 
     try:
-        verdicts = run_pipeline(request.text)
+        court_filter = [request.jurisdiction] if request.jurisdiction else None
+        verdicts = run_pipeline(request.text, court_filter=court_filter)
     except Exception as e:
         logger.exception("Pipeline error: %s", e)
         raise HTTPException(status_code=500, detail=f"Pipeline error: {str(e)}")

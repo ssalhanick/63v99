@@ -63,3 +63,36 @@ CITATION_DENSITY_THRESHOLD = 1   # minimum shared citations — tune on validati
 # Cache (Week 6)
 CACHE_TTL             = 3600   # seconds — TTL for query embedding + ANN result cache
 CACHE_MAX_SIZE        = 512    # max entries in LRU cache
+
+# BM25 legal term preservation (Phase 1 — shared between tokenize_bm25.py and semantic_check.py)
+# Terms preserved even when spaCy marks them as stopwords — carry strong Fourth Amendment signal.
+LEGAL_PRESERVE = {
+    "unreasonable", "reasonable", "reasonably",
+    "warrant", "warrantless",
+    "probable", "cause",
+    "seizure", "seize", "seized",
+    "search", "searched", "searching",
+    "arrest", "arrested",
+    "consent", "consented",
+    "exception", "exceptions",
+    "curtilage",
+    "exigent",
+    "contraband",
+    "suppression", "suppress", "suppressed",
+    "exclusionary",
+    "detention", "detain", "detained",
+    "stop", "frisk",
+    "plain", "view",
+    "expectation", "privacy",
+    "trespass",
+    "third", "party",
+}
+
+# Party name consistency check (Phase 1 — Step 1.3)
+NAME_SCORE_THRESHOLD  = 0.70   # rapidfuzz token_sort_ratio floor — below this flags SUSPICIOUS
+
+# Learned scorer (Phase 3 — Step 3.1)
+SCORER_PATH = os.path.join(ROOT_DIR, "benchmark", "scorer.pkl")
+
+# Neo4j PageRank (Phase 4) — computed via pure-Python power iteration in db/compute_pagerank.py
+# GDS plugin is NOT required; scores are written as `pagerank` property on Case nodes.
