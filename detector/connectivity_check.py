@@ -20,6 +20,10 @@ Verdict contribution:
   density <  CITATION_DENSITY_THRESHOLD → not connected (SUSPICIOUS signal)
 
 Note: case_id=None returns density=0, is_connected=False immediately.
+
+Phase 4.1 addition:
+  Also fetches `c.pagerank` — the GDS PageRank authority score written by
+  db/compute_pagerank.py. Returns None if PageRank has not yet been computed.
 """
 
 import logging
@@ -45,8 +49,9 @@ from dataclasses import dataclass
 
 @dataclass
 class ConnectivityResult:
-    density_score: int    # number of shared citations with corpus cases
-    is_connected:  bool   # density_score >= CITATION_DENSITY_THRESHOLD
+    density_score:  int             # number of shared citations with corpus cases
+    is_connected:   bool            # density_score >= CITATION_DENSITY_THRESHOLD
+    pagerank_score: Optional[float] # GDS PageRank authority score (None until computed)
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +73,7 @@ def check_connectivity(case_id: Optional[int], driver=None) -> ConnectivityResul
     """
     if case_id is None:
         logger.debug("case_id is None — skipping connectivity check")
-        return ConnectivityResult(density_score=0, is_connected=False)
+        return ConnectivityResult(density_score=0, is_connected=False, pagerank_score=None)
 
     close_after = driver is None
     if close_after:
@@ -76,35 +81,47 @@ def check_connectivity(case_id: Optional[int], driver=None) -> ConnectivityResul
 
     try:
         with driver.session() as session:
+            # Single query: fetch density + pagerank together to avoid
+            # a second round-trip.  pagerank may be null if
+            # db/compute_pagerank.py hasn't been run yet.
             result = session.run(
                 """
                 MATCH (target:Case {id: $id})-[:CITES]->(shared)
                       <-[:CITES]-(corpus:Case {stub: false})
-                RETURN count(DISTINCT shared) AS density
+                WITH count(DISTINCT shared) AS density
+                MATCH (c:Case {id: $id})
+                RETURN density, c.pagerank AS pagerank
                 """,
                 id=case_id,
             )
             record = result.single()
-            density = int(record["density"]) if record else 0
+            density  = int(record["density"])            if record else 0
+            pagerank = float(record["pagerank"])         if (record and record["pagerank"] is not None) else None
 
         is_connected = density >= CITATION_DENSITY_THRESHOLD
 
         if is_connected:
             logger.info(
-                "Layer 3 PASS — case_id %d: density=%d (threshold=%d)",
-                case_id, density, CITATION_DENSITY_THRESHOLD,
+                "Layer 3 PASS — case_id %d: density=%d pagerank=%s (threshold=%d)",
+                case_id, density, f"{pagerank:.6f}" if pagerank is not None else "N/A",
+                CITATION_DENSITY_THRESHOLD,
             )
         else:
             logger.info(
-                "Layer 3 FAIL — case_id %d: density=%d (threshold=%d)",
-                case_id, density, CITATION_DENSITY_THRESHOLD,
+                "Layer 3 FAIL — case_id %d: density=%d pagerank=%s (threshold=%d)",
+                case_id, density, f"{pagerank:.6f}" if pagerank is not None else "N/A",
+                CITATION_DENSITY_THRESHOLD,
             )
 
-        return ConnectivityResult(density_score=density, is_connected=is_connected)
+        return ConnectivityResult(
+            density_score=density,
+            is_connected=is_connected,
+            pagerank_score=pagerank,
+        )
 
     except Exception as e:
         logger.error("Neo4j connectivity query error for case_id %s: %s", case_id, e)
-        return ConnectivityResult(density_score=0, is_connected=False)
+        return ConnectivityResult(density_score=0, is_connected=False, pagerank_score=None)
 
     finally:
         if close_after:

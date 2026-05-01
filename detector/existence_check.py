@@ -23,24 +23,27 @@ from config import NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD
 logger = logging.getLogger(__name__)
 
 
-def check_existence(case_id: Optional[int], driver=None) -> bool:
+def check_existence(case_id: Optional[int], driver=None) -> tuple[bool, Optional[str]]:
     """
-    Return True if a Case node with the given case_id exists in Neo4j.
-    Return False if not found or if case_id is None.
+    Return (True, node_name) if a Case node with the given case_id exists in Neo4j.
+    Return (False, None) if not found or if case_id is None.
+
+    The node_name is used by the name check (Step 1.3) to compare party names
+    in the citation string against the stored case name without a second query.
 
     Args:
-        case_id: CourtListener cluster ID (integer). None → returns False.
+        case_id: CourtListener cluster ID (integer). None → returns (False, None).
         driver:  optional Neo4j driver instance. If not provided, a new
                  driver is created and closed after the query. Pass a driver
                  when calling from the pipeline to reuse the connection.
 
     Returns:
-        True  → node exists in graph (proceed to Layers 2 and 3)
-        False → node not found (HALLUCINATED verdict)
+        (True, node_name)  → node exists in graph (proceed to Layers 2 and 3)
+        (False, None)      → node not found (HALLUCINATED verdict)
     """
     if case_id is None:
         logger.debug("case_id is None — skipping Neo4j lookup, returning False")
-        return False
+        return False, None
 
     close_after = driver is None
     if close_after:
@@ -49,22 +52,23 @@ def check_existence(case_id: Optional[int], driver=None) -> bool:
     try:
         with driver.session() as session:
             result = session.run(
-                "MATCH (c:Case {id: $id}) RETURN c.id AS id LIMIT 1",
+                "MATCH (c:Case {id: $id}) RETURN c.id AS id, c.name AS name LIMIT 1",
                 id=case_id,
             )
             record = result.single()
-            exists = record is not None
+            exists    = record is not None
+            node_name = str(record["name"]) if exists and record["name"] else None
 
         if exists:
-            logger.info("Layer 1 PASS — case_id %d found in Neo4j", case_id)
+            logger.info("Layer 1 PASS — case_id %d found in Neo4j (name=%r)", case_id, node_name)
         else:
             logger.info("Layer 1 FAIL — case_id %d not found in Neo4j", case_id)
 
-        return exists
+        return exists, node_name
 
     except Exception as e:
         logger.error("Neo4j query error for case_id %s: %s", case_id, e)
-        return False
+        return False, None
 
     finally:
         if close_after:
@@ -96,7 +100,7 @@ if __name__ == "__main__":
     print(f"\n{'Case':<55} {'Exists':>6}")
     print("-" * 63)
     for case_id, label in test_cases:
-        result = check_existence(case_id, driver=driver)
-        print(f"{label:<55} {str(result):>6}")
+        exists, node_name = check_existence(case_id, driver=driver)
+        print(f"{label:<55} {str(exists):>6}  {node_name or ''}")
 
     driver.close()
