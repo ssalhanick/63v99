@@ -6,6 +6,7 @@ Run from project root:
     python -m benchmark.evaluate
 """
 
+import csv
 import json
 import logging
 import sys
@@ -23,12 +24,15 @@ from detector.existence_check import check_existence
 from detector.semantic_check import semantic_check
 from detector.connectivity_check import check_connectivity
 from detector.metadata_check import check_metadata
+from detector.name_check import check_name
+from detector.temporal_check import check_temporal
 from detector.llm_check import llm_check
 
 
 BENCHMARK_PATH      = Path(config.BENCHMARK_DIR) / "benchmark.json"
 THRESHOLDS_OUT_PATH = Path(config.BENCHMARK_DIR) / "tuned_thresholds.json"
 SPLIT_CACHE_PATH    = Path(config.BENCHMARK_DIR) / "split_indices.json"
+RAW_SCORES_PATH     = Path(config.BENCHMARK_DIR) / "raw_scores.csv"
 
 HALLUCINATED = "HALLUCINATED"
 SUSPICIOUS   = "SUSPICIOUS"
@@ -84,12 +88,16 @@ def stratified_split(data: list[dict], test_size: float = 0.20, seed: int = 42):
 
 
 def run_entry(entry: dict, driver) -> dict:
-    """Run all four layers. Returns raw scores for threshold-free re-evaluation."""
+    """Run all layers. Returns raw scores for threshold-free re-evaluation and scorer training."""
     case_id         = entry.get("case_id")
     context_text    = entry["context"]
     citation_string = entry["citation"]
 
-    exists = check_existence(case_id, driver=driver) if case_id is not None else False
+    # Layer 1 — existence (now returns tuple: bool, Optional[str])
+    if case_id is not None:
+        exists, node_name = check_existence(case_id, driver=driver)
+    else:
+        exists, node_name = False, None
 
     if not exists:
         return {
@@ -100,20 +108,34 @@ def run_entry(entry: dict, driver) -> dict:
             "exists":           False,
             "rrf_score":        None,
             "dense_score":      None,
+            "case_sim":         None,
             "density_score":    None,
+            "pagerank_score":   None,
             "metadata_valid":   None,
             "meta_checked":     False,
             "meta_year_match":  None,
             "meta_court_match": None,
+            "name_score":       None,
+            "name_checked":     False,
+            "temporal_valid":   None,
+            "temporal_checked": False,
+            "temporal_reason":  None,
             "llm_accurate":     None,
             "llm_checked":      False,
         }
 
-    sem  = semantic_check(context_text)
+    # Layer 2a — semantic (pass case_id to get case_sim)
+    sem  = semantic_check(context_text, case_id=case_id)
+    # Layer 3 — connectivity
     conn = check_connectivity(case_id, driver=driver)
+    # Layer 4 — metadata
     meta = check_metadata(case_id, citation_string, driver=driver)
+    # Name check — reuses node_name from L1
+    name = check_name(citation_string, node_name)
+    # Temporal check — reuses year fields from L4
+    temp = check_temporal(cited_year=meta.cited_year, actual_year=meta.actual_year)
 
-    # Only call LLM check on proposition-type entries to control cost
+    # Layer 2b — LLM (only for proposition-type entries to control cost)
     corruption_type = entry.get("corruption_type")
     if corruption_type == "proposition":
         llm  = llm_check(case_id, context_text)
@@ -125,18 +147,25 @@ def run_entry(entry: dict, driver) -> dict:
         llm_checked  = False
 
     return {
-         "benchmark_id":     entry["benchmark_id"],
+        "benchmark_id":     entry["benchmark_id"],
         "label":            entry["label"],
         "subtype":          entry["subtype"],
         "corruption_type":  corruption_type,
         "exists":           True,
         "rrf_score":        sem.rrf_score,
         "dense_score":      sem.top_dense_score,
+        "case_sim":         sem.case_sim,
         "density_score":    conn.density_score,
+        "pagerank_score":   conn.pagerank_score,      # Phase 4.1 — None until compute_pagerank.py run
         "metadata_valid":   meta.is_valid,
         "meta_checked":     meta.checked,
         "meta_year_match":  meta.year_match,
         "meta_court_match": meta.court_match,
+        "name_score":       name.score       if name.checked else None,
+        "name_checked":     name.checked,
+        "temporal_valid":   temp.is_valid    if temp.checked else None,
+        "temporal_checked": temp.checked,
+        "temporal_reason":  temp.reason,
         "llm_accurate":     llm_accurate,
         "llm_checked":      llm_checked,
     }
@@ -368,6 +397,26 @@ def print_summary(label: str, metrics: dict):
             print(f"    {st:12s}: {f1:.4f}")
 
 
+def _write_raw_scores(results: list[dict], path: Path) -> None:
+    """Write all raw signal scores to a CSV for use as scorer training data."""
+    if not results:
+        return
+    fieldnames = [
+        "benchmark_id", "label", "subtype", "corruption_type",
+        "exists", "rrf_score", "dense_score", "case_sim",
+        "density_score", "pagerank_score",          # Phase 4.1 addition
+        "metadata_valid", "meta_checked",
+        "name_score", "name_checked",
+        "temporal_valid", "temporal_checked", "temporal_reason",
+        "llm_accurate", "llm_checked",
+    ]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(results)
+    logger.info("Raw scores written → %s  (%d rows)", path, len(results))
+
+
 def main():
     data = load_benchmark()
     val, _ = stratified_split(data)
@@ -380,6 +429,9 @@ def main():
     try:
         logger.info("Running inference on val set (%d entries)...", len(val))
         val_results = run_inference(val, driver)
+
+        # Write raw scores CSV — training data for the Phase 3 learned scorer
+        _write_raw_scores(val_results, RAW_SCORES_PATH)
 
         rrf_start = getattr(config, "RRF_THRESHOLD", 0.020)
 
