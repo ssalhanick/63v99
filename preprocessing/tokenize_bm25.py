@@ -33,7 +33,7 @@ import pandas as pd
 import spacy
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config import PROCESSED_DIR
+from config import PROCESSED_DIR, LEGAL_PRESERVE
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,29 +45,7 @@ INPUT_CLEANED    = Path(PROCESSED_DIR) / "cases_cleaned.parquet"
 INPUT_EMBEDDINGS = Path(PROCESSED_DIR) / "embeddings.parquet"
 OUTPUT_PATH      = Path(PROCESSED_DIR) / "cases_tokenized.parquet"
 
-# Legal terms to preserve even though spaCy marks some as stopwords.
-# These carry strong Fourth Amendment signal — stripping them degrades BM25 recall.
-LEGAL_PRESERVE = {
-    "unreasonable", "reasonable", "reasonably",
-    "warrant", "warrantless",
-    "probable", "cause",
-    "seizure", "seize", "seized",
-    "search", "searched", "searching",
-    "arrest", "arrested",
-    "consent", "consented",
-    "exception", "exceptions",
-    "curtilage",
-    "exigent",
-    "contraband",
-    "suppression", "suppress", "suppressed",
-    "exclusionary",
-    "detention", "detain", "detained",
-    "stop", "frisk",
-    "plain", "view",
-    "expectation", "privacy",
-    "trespass",
-    "third", "party",
-}
+# LEGAL_PRESERVE imported from config.py — single source of truth shared with semantic_check.py
 
 # Minimum token count — cases with fewer tokens after processing are skipped.
 # Very short tokenized texts produce unreliable BM25 scores.

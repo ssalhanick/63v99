@@ -42,6 +42,7 @@ from config import (
     TOP_K,
     RRF_K,
     BM25_INDEX_PATH,
+    LEGAL_PRESERVE,
 )
 
 logging.basicConfig(
@@ -68,7 +69,8 @@ METADATA_COLS = ["case_id", "case_name", "court_id", "date_filed", "cite_count"]
 @dataclass
 class SemanticResult:
     rrf_score:        float
-    top_dense_score:  float   # cosine similarity of top dense hit (0.0–1.0)
+    top_dense_score:  float    # cosine similarity of top dense hit (0.0-1.0)
+    case_sim:         float | None  # cosine sim of proposition vs. this specific case (None if no case_id)
     is_relevant:      bool
     top_matches:      list[dict] = field(default_factory=list)
     # top_matches entries:
@@ -85,6 +87,7 @@ _bm25_ids    = None   # list[int] — position i → case_id (BM25 corpus order)
 _metadata_df = None   # DataFrame keyed on case_id for fast lookup
 _embedder    = None   # legal-bert tokenizer + model
 _milvus      = None   # MilvusClient
+_nlp         = None   # spaCy model for query lemmatization (lazy-loaded)
 
 
 def _load_bm25():
@@ -203,15 +206,46 @@ def _embed(text: str) -> list[float]:
 # BM25 search
 # ---------------------------------------------------------------------------
 
+def _get_nlp():
+    """
+    Lazy-load spaCy en_core_web_sm (parser + ner disabled for speed).
+    Reuses a module-level singleton so the model loads only once.
+    """
+    global _nlp
+    if _nlp is None:
+        try:
+            import spacy
+            _nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
+            log.info("spaCy model loaded for query tokenization")
+        except OSError:
+            log.error(
+                "spaCy model not found. Run: python -m spacy download en_core_web_sm"
+            )
+            raise
+    return _nlp
+
+
 def _tokenize_query(text: str) -> list[str]:
     """
-    Lightweight query tokenizer — lowercase + split.
-    No lemmatization at query time to keep latency low;
-    BM25 recall is sufficient with simple tokenization for short queries.
+    Lemmatize and filter query text using the same spaCy pipeline used during
+    corpus tokenization in preprocessing/tokenize_bm25.py.
+
+    This ensures query tokens match corpus tokens exactly — resolving the
+    vocabulary mismatch where the old bare regex tokenizer produced surface forms
+    (e.g. "searches") that BM25 couldn't match against lemmatized corpus tokens
+    (e.g. "search").
+
+    Legal terms in LEGAL_PRESERVE are kept even if spaCy marks them as stopwords.
     """
-    import re
-    tokens = re.findall(r"[a-z]+", text.lower())
-    return [t for t in tokens if len(t) > 1]
+    nlp = _get_nlp()
+    doc = nlp(text.lower()[:5000])
+    return [
+        token.lemma_.lower()
+        for token in doc
+        if (not token.is_stop or token.lemma_.lower() in LEGAL_PRESERVE)
+        and token.is_alpha
+        and len(token.lemma_) > 1
+    ]
 
 
 def _bm25_search(query_text: str, top_k: int) -> list[tuple[int, float]]:
@@ -242,11 +276,18 @@ def _dense_search(query_vector: list[float], top_k: int) -> list[tuple[int, floa
             "metric_type": "COSINE",
             "params":      {"ef": HNSW_EF},
         },
-        limit           = top_k,
+        limit           = top_k * 5,
         output_fields   = ["case_id"],
     )
     hits = results[0]  # single query → single result list
-    return [(hit["entity"]["case_id"], float(hit["distance"])) for hit in hits]
+    
+    from collections import defaultdict
+    case_scores = defaultdict(float)
+    for hit in hits:
+        cid = hit["entity"]["case_id"]
+        case_scores[cid] = max(case_scores[cid], float(hit["distance"]))
+        
+    return sorted(case_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
 
 
 # ---------------------------------------------------------------------------
@@ -330,18 +371,16 @@ def _case_specific_similarity(case_id: int, query_vector: list[float]) -> float:
             collection_name=MILVUS_COLLECTION,
             filter=f"case_id == {case_id}",
             output_fields=["embedding"],
-            limit=1
+            limit=100
         )
         if not result:
             log.warning("case_id %d not found in Milvus — defaulting to 0.0", case_id)
             return 0.0
 
-        case_vector = np.array(result[0]["embedding"])
         query_array = np.array(query_vector)
+        similarities = [float(np.dot(query_array, np.array(r["embedding"]))) for r in result]
 
-        # Cosine similarity (vectors are already L2-normalized)
-        similarity = float(np.dot(query_array, case_vector))
-        return max(0.0, similarity)  # clamp negatives to 0
+        return max(0.0, max(similarities))  # clamp negatives to 0
 
     except Exception as e:
         log.error("Milvus query error for case_id %d: %s", case_id, e)
@@ -354,7 +393,12 @@ def _case_specific_similarity(case_id: int, query_vector: list[float]) -> float:
 # Case-specific similarity threshold
 CASE_SIMILARITY_THRESHOLD = 0.80  # tune if needed
 
-def semantic_check(context_text: str, top_k: int = TOP_K, case_id: int = None) -> SemanticResult:
+def semantic_check(
+    context_text: str,
+    top_k: int = TOP_K,
+    case_id: int = None,
+    court_filter: list[str] = None
+) -> SemanticResult:
     _load_all()
 
     # 1. Embed context
@@ -364,7 +408,19 @@ def semantic_check(context_text: str, top_k: int = TOP_K, case_id: int = None) -
     dense_hits = _dense_search(query_vector, top_k=top_k)
 
     # 3. BM25 sparse search
-    sparse_hits = _bm25_search(context_text, top_k=top_k)
+    sparse_hits = _bm25_search(context_text, top_k=top_k * 5 if court_filter else top_k)
+
+    # Apply court filter if provided
+    if court_filter:
+        court_filter_set = set(court_filter)
+        dense_hits = [
+            (cid, score) for cid, score in dense_hits
+            if cid in _metadata_df.index and str(_metadata_df.loc[cid, "court_id"]) in court_filter_set
+        ]
+        sparse_hits = [
+            (cid, score) for cid, score in sparse_hits
+            if cid in _metadata_df.index and str(_metadata_df.loc[cid, "court_id"]) in court_filter_set
+        ]
 
     # 4. RRF fusion
     fused = _rrf_fuse(dense_hits, sparse_hits)
@@ -392,6 +448,7 @@ def semantic_check(context_text: str, top_k: int = TOP_K, case_id: int = None) -
     return SemanticResult(
         rrf_score       = top_rrf_score,
         top_dense_score = top_dense_score,
+        case_sim        = case_sim,
         is_relevant     = is_relevant,
         top_matches     = top_matches,
     )

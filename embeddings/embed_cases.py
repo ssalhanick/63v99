@@ -45,6 +45,7 @@ log = logging.getLogger(__name__)
 
 INPUT_PATH  = Path(PROCESSED_DIR) / "cases_pruned.parquet"
 OUTPUT_PATH = Path(PROCESSED_DIR) / "embeddings.parquet"
+CHUNKED_OUTPUT_PATH = Path(PROCESSED_DIR) / "embeddings_chunked.parquet"
 
 # Tunable constants
 MAX_TOKENS       = 512     # legal-bert max sequence length
@@ -129,7 +130,7 @@ def embed_text_chunks(
     device: torch.device,
 ) -> np.ndarray:
     """
-    Embed all chunks, return mean-pooled 768-dim vector for the case.
+    Embed all chunks, return (n_chunks, 768) array of chunk vectors.
     """
     all_chunk_vectors = []
 
@@ -150,8 +151,7 @@ def embed_text_chunks(
         all_chunk_vectors.append(vecs)
 
     stacked = np.vstack(all_chunk_vectors)      # (n_chunks, 768)
-    case_vector = stacked.mean(axis=0)           # mean-pool across chunks → (768,)
-    return case_vector
+    return stacked
 
 
 def l2_normalize(vec: np.ndarray) -> np.ndarray:
@@ -166,15 +166,17 @@ def l2_normalize(vec: np.ndarray) -> np.ndarray:
 # Main
 # ---------------------------------------------------------------------------
 
-def main(resume: bool = False) -> None:
+def main(resume: bool = False, use_chunks: bool = False) -> None:
+    output_path = CHUNKED_OUTPUT_PATH if use_chunks else OUTPUT_PATH
+    
     log.info(f"Loading pruned corpus from {INPUT_PATH}")
     df = pd.read_parquet(INPUT_PATH, columns=["case_id", "plain_text"])
     log.info(f"  {len(df):,} cases to embed")
 
     # Resume: skip already-embedded cases
     already_done: set = set()
-    if resume and OUTPUT_PATH.exists():
-        existing = pd.read_parquet(OUTPUT_PATH, columns=["case_id"])
+    if resume and output_path.exists():
+        existing = pd.read_parquet(output_path, columns=["case_id"])
         already_done = set(existing["case_id"].tolist())
         log.info(f"  Resuming: {len(already_done):,} cases already embedded, skipping")
         df = df[~df["case_id"].isin(already_done)].reset_index(drop=True)
@@ -211,49 +213,58 @@ def main(resume: bool = False) -> None:
             log.warning(f"  case_id={case_id}: no chunks produced, skipping")
             continue
 
-        vec = embed_text_chunks(chunks, tokenizer, model, device)
-        vec = l2_normalize(vec)
+        vecs = embed_text_chunks(chunks, tokenizer, model, device)
+        
+        if use_chunks:
+            for chunk_idx, vec in enumerate(vecs):
+                vec = l2_normalize(vec)
+                records.append({"case_id": int(case_id), "chunk_index": chunk_idx, "embedding": vec.tolist()})
+        else:
+            case_vector = vecs.mean(axis=0)
+            case_vector = l2_normalize(case_vector)
+            records.append({"case_id": int(case_id), "embedding": case_vector.tolist()})
 
-        records.append({"case_id": int(case_id), "embedding": vec.tolist()})
-
-        i = len(records)
-        if i % 10 == 0:
+        case_count = idx + 1
+        if case_count % 10 == 0:
             elapsed = time.time() - start_time
-            rate    = i / elapsed
-            eta     = (total - i) / rate if rate > 0 else 0
+            rate    = case_count / elapsed
+            eta     = (total - case_count) / rate if rate > 0 else 0
             log.info(
-                f"  [{i}/{total}] case_id={case_id} | "
+                f"  [{case_count}/{total}] case_id={case_id} | "
                 f"chunks={len(chunks)} | "
                 f"{rate:.1f} cases/s | ETA {eta/60:.1f}m"
             )
 
         # Incremental save
-        if i % SAVE_EVERY == 0:
-            _save(records, already_done)
+        if case_count > 0 and case_count % SAVE_EVERY == 0:
+            _save(records, already_done, output_path)
 
     # Final save
-    _save(records, already_done)
-    log.info(f"Done. {len(records):,} new embeddings saved → {OUTPUT_PATH}")
+    _save(records, already_done, output_path)
+    log.info(f"Done. {len(records):,} new embeddings saved → {output_path}")
 
 
-def _save(records: list[dict], already_done: set) -> None:
-    """Merge new records with any existing embeddings.parquet and write."""
+def _save(records: list[dict], already_done: set, output_path: Path) -> None:
+    """Merge new records with any existing embeddings and write."""
     if not records:
         return
 
     new_df = pd.DataFrame(records)
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if OUTPUT_PATH.exists() and already_done:
-        existing_df = pd.read_parquet(OUTPUT_PATH)
+    if output_path.exists() and already_done:
+        existing_df = pd.read_parquet(output_path)
         combined    = pd.concat([existing_df, new_df], ignore_index=True)
         # De-duplicate in case of retry
-        combined    = combined.drop_duplicates(subset=["case_id"], keep="last")
+        if "chunk_index" in combined.columns:
+            combined = combined.drop_duplicates(subset=["case_id", "chunk_index"], keep="last")
+        else:
+            combined = combined.drop_duplicates(subset=["case_id"], keep="last")
     else:
         combined = new_df
 
-    combined.to_parquet(OUTPUT_PATH, index=False)
-    log.info(f"  Checkpoint saved: {len(combined):,} total embeddings → {OUTPUT_PATH}")
+    combined.to_parquet(output_path, index=False)
+    log.info(f"  Checkpoint saved: {len(combined):,} total embeddings → {output_path}")
 
 
 if __name__ == "__main__":
@@ -261,7 +272,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Skip case_ids already present in embeddings.parquet",
+        help="Skip case_ids already present in output file",
+    )
+    parser.add_argument(
+        "--chunks",
+        action="store_true",
+        help="Export one vector per chunk instead of mean-pooling per case",
     )
     args = parser.parse_args()
-    main(resume=args.resume)
+    main(resume=args.resume, use_chunks=args.chunks)

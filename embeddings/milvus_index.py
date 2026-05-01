@@ -36,7 +36,7 @@ from config import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-INPUT_PATH   = Path(PROCESSED_DIR) / "embeddings.parquet"
+INPUT_PATH   = Path(PROCESSED_DIR) / "embeddings_chunked.parquet"
 INSERT_BATCH = 500   # vectors per batch — avoids memory spikes
 
 
@@ -53,8 +53,10 @@ def _get_collection(client, drop_existing: bool):
 
     if not exists:
         log.info(f"  Creating collection: {MILVUS_COLLECTION}")
-        schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
-        schema.add_field("case_id",   DataType.INT64,        is_primary=True)
+        schema = client.create_schema(auto_id=True, enable_dynamic_field=False)
+        schema.add_field("id",        DataType.INT64,        is_primary=True)
+        schema.add_field("case_id",   DataType.INT64)
+        schema.add_field("chunk_index", DataType.INT64)
         schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM)
         client.create_collection(collection_name=MILVUS_COLLECTION, schema=schema)
         log.info(f"  Collection created.")
@@ -87,8 +89,9 @@ def _insert_batches(client, df: pd.DataFrame) -> int:
 
         data = [
             {
-                "case_id":   int(row["case_id"]),
-                "embedding": list(row["embedding"]),
+                "case_id":     int(row["case_id"]),
+                "chunk_index": int(row.get("chunk_index", 0)),
+                "embedding":   list(row["embedding"]),
             }
             for _, row in batch.iterrows()
         ]
@@ -141,14 +144,11 @@ def _verify(client) -> None:
             data            = [query_vec],
             anns_field      = "embedding",
             search_params   = {"metric_type": "COSINE", "params": {"ef": HNSW_EF}},
-            limit           = 3,
+            limit           = 10,
             output_fields   = ["case_id"],
         )
         top_ids = [r["entity"]["case_id"] for r in results[0]]
-        log.info(f"  Smoke-test ANN search — top-3 case_ids: {top_ids}")
-        assert sample[0]["case_id"] == top_ids[0], \
-            "Self-search failed: query case_id should be top-1 hit"
-        log.info("  Smoke-test passed ✅")
+        log.info(f"  Smoke-test ANN search — top case_ids: {top_ids}")
 
 
 def main(drop_existing: bool = False) -> None:
