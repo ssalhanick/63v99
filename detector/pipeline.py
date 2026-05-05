@@ -159,19 +159,20 @@ def _compute_verdict(
     bundle = _get_scorer()
     if bundle is not None:
         scaler, model = bundle["scaler"], bundle["model"]
+        # exists and metadata_valid are excluded — both are always 1.0 by this
+        # point (hard gates above have already returned HALLUCINATED on failure).
+        # The scorer is trained on the same 7-feature set.
         x = np.array([[
-            float(exists),
             semantic.rrf_score          if semantic                       else 0.0,
             semantic.top_dense_score    if semantic                       else 0.0,
             semantic.case_sim           if semantic and semantic.case_sim is not None else 0.0,
             float(connectivity.density_score) if connectivity             else 0.0,
             float(connectivity.pagerank_score) if (connectivity and connectivity.pagerank_score is not None) else 0.0,
-            float(metadata.is_valid)    if metadata  and metadata.checked else 1.0,
             name_check.score            if name_check and name_check.checked else 1.0,
             float(temporal.is_valid)    if temporal  and temporal.checked else 1.0,
         ]])
-        # Scorer may have been trained without pagerank_score (Phase 3 model).
-        # Trim the feature vector to match the stored model's expected width.
+        # Backward-compat guard: trim to stored model's expected width if needed
+        # (e.g. loading a Phase 3 9-feature pkl against the new 7-feature vector).
         expected_n = scaler.n_features_in_
         if x.shape[1] > expected_n:
             x = x[:, :expected_n]
@@ -182,6 +183,7 @@ def _compute_verdict(
         if p_hallucinated >= _P_SUSPICIOUS:
             return SUSPICIOUS
         return REAL
+
 
     # --- Boolean fallback ---
     l2a      = semantic.is_relevant          if semantic                              else False

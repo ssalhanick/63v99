@@ -41,22 +41,33 @@ SCORER_PATH     = Path(getattr(config, "SCORER_PATH", "benchmark/scorer.pkl"))
 # Feature engineering
 # ---------------------------------------------------------------------------
 
+# Only features that vary in production (after L1 and L4 hard gates have cleared).
+# exists=True and metadata_valid=True are constants for every row that reaches
+# the scorer at inference time — training on them inflates coefficients without
+# adding signal. Dropped here; the hard-gate logic in pipeline.py still enforces them.
 FEATURES = [
-    "exists",          # bool → 0/1  (L1)
     "rrf_score",       # float        (L2a)
     "dense_score",     # float        (L2a)
     "case_sim",        # float | None (L2a, requires case_id)
     "density_score",   # int   | None (L3)
-    "pagerank_score",  # float | None (L3 + Phase 4.1 — GDS PageRank)
-    "metadata_valid",  # bool  | None (L4)
-    "name_score",      # float | None (Step 1.3)
-    "temporal_valid",  # bool  | None (Step 2.3)
+    "pagerank_score",  # float | None (L3 + Phase 4.1 — PageRank)
+    "name_score",      # float | None (Name check)
+    "temporal_valid",  # bool  | None (Temporal check)
 ]
 
 
 def load_features(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """
     Load and preprocess raw_scores.csv into (X, y, benchmark_ids).
+
+    Rows are filtered to only entries that pass both hard gates:
+      - exists=True   (L1 passed — case is in the graph)
+      - metadata_valid != False  (L4 passed or was not checked)
+
+    This mirrors the production condition: the scorer only runs after L1 and L4
+    have already cleared. Training on rows that would have been short-circuited
+    inflates the weight of constant features (exists, metadata_valid) without
+    adding real signal for the cases the scorer actually needs to decide.
 
     Missing values are filled with conservative defaults:
       - numeric scores  → 0.0  (treated as weakest signal)
@@ -65,12 +76,22 @@ def load_features(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:
     df = pd.read_csv(path)
     logger.info("Loaded %d rows from %s", len(df), path)
 
+    # --- Filter to rows that reach the scorer in production ---
+    before = len(df)
+    df = df[df["exists"] == True].copy()
+    df = df[df["metadata_valid"].fillna(True) != False].copy()
+    after = len(df)
+    logger.info(
+        "Filtered to scorer-reachable rows: %d → %d  (dropped %d L1/L4 short-circuits)",
+        before, after, before - after,
+    )
+
     # Encode label: HALLUCINATED or SUSPICIOUS → 1, REAL → 0
     y = (df["label"].isin(["HALLUCINATED", "SUSPICIOUS"])).astype(int).values
+    logger.info("Label distribution: %d positive / %d negative", y.sum(), (1 - y).sum())
 
-    # Build feature matrix
+    # Build feature matrix (exists and metadata_valid excluded — constants after filtering)
     X_df = pd.DataFrame()
-    X_df["exists"]         = df["exists"].astype(float)
     X_df["rrf_score"]      = df["rrf_score"].fillna(0.0).astype(float)
     X_df["dense_score"]    = df["dense_score"].fillna(0.0).astype(float)
     X_df["case_sim"]       = df["case_sim"].fillna(0.0).astype(float)
@@ -78,7 +99,6 @@ def load_features(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:
     # pagerank: fill missing with 0.0 (lowest authority — conservative)
     X_df["pagerank_score"] = df["pagerank_score"].fillna(0.0).astype(float) if "pagerank_score" in df.columns else 0.0
     # Boolean fields: NaN means check didn't run → treat as passing (1.0)
-    X_df["metadata_valid"] = df["metadata_valid"].fillna(1.0).astype(float)
     X_df["name_score"]     = df["name_score"].fillna(1.0).astype(float)
     X_df["temporal_valid"] = df["temporal_valid"].fillna(1.0).astype(float)
 
