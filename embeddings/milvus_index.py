@@ -9,8 +9,8 @@ CRITICAL ordering:
   2. Then call create_index()
   Milvus HNSW quality degrades if indexed incrementally.
 
-Input:  data/processed/embeddings.parquet  (case_id | embedding)
-Output: milvus_verit.db  (Milvus Lite local DB)
+Input:  data/processed/embeddings_chunked.parquet  (case_id | chunk_index | embedding)
+Output: Milvus collection (20,152 chunk vectors across 1,353 cases; HNSW index)
 
 Run:
   python -m embeddings.milvus_index [--drop-existing]

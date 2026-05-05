@@ -7,12 +7,14 @@ legal-bert-base-uncased. Saves incrementally to parquet (crash-safe).
 Pipeline per case:
   1. Structure-aware paragraph chunking (512-token ceiling, 1-paragraph overlap)
   2. legal-bert inference in batches of EMBED_BATCH_SIZE
-  3. Mean-pool chunk [CLS] token embeddings → 1 vector per case
-  4. L2-normalize the pooled vector
-  5. Append to running parquet file
+  3a. [default]    Mean-pool chunk vectors → 1 vector per case → embeddings.parquet
+  3b. [--chunks]   Save each chunk vector individually → embeddings_chunked.parquet
+  4. L2-normalize each vector before saving
+  5. Append to running parquet file (crash-safe incremental saves)
 
 Input:  data/processed/cases_pruned.parquet
-Output: data/processed/embeddings.parquet  (case_id | embedding)
+Output: data/processed/embeddings.parquet         (case_id | embedding)           [default]
+        data/processed/embeddings_chunked.parquet  (case_id | chunk_index | embedding) [--chunks]
 
 Run:
   python -m embeddings.embed_cases [--resume]

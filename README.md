@@ -24,7 +24,7 @@ Existing tools like LexisNexis are research interfaces — they help lawyers _fi
 
 ## The Solution
 
-Verit runs every citation through a **four-layer** verification pipeline:
+Verit runs every citation through a **multi-layer** verification pipeline combining graph lookups, semantic search, LLM reasoning, and a calibrated learned scorer:
 
 ```
 AI-Generated Legal Text
@@ -36,6 +36,15 @@ AI-Generated Legal Text
  Layer 1: Neo4j      →  Does this case exist as a node in the graph?
         │                If not → HALLUCINATED (stop)
         ▼
+ Layer 4: Metadata   →  Does year/court in the citation string match
+        │                the Neo4j node? Mismatch → HALLUCINATED (stop)
+        ▼
+ Name Check          →  Do party names fuzzy-match the Neo4j case name?
+        │                (rapidfuzz token_sort_ratio) Low score → SUSPICIOUS
+        ▼
+ Temporal Check      →  Is the cited year in the future, or before the
+        │                case was actually decided? → SUSPICIOUS
+        ▼
  Layer 2a: Milvus    →  Is the context semantically consistent with the
         │                Fourth Amendment corpus? (hybrid ANN + BM25 via RRF)
         ▼
@@ -43,29 +52,46 @@ AI-Generated Legal Text
         │                specific case actually held? (LLM accuracy check)
         ▼
  Layer 3: Neo4j      →  Is the case well-connected in the citation network?
-        │                (citation density threshold)
+        │                (citation density + PageRank authority weighting)
+        ▼
+ Cross-Citation      →  Across all citations in the document: Jaccard
+        │                similarity of citation neighborhoods + shortest-hop
+        │                distance between cases (doctrinal coherence signal)
+        ▼
+ Doctrine Check      →  Do the cases share Fourth Amendment doctrine tags?
+        │                ([:APPLIES_DOCTRINE] coherence via Neo4j ontology)
+        ▼
+ Learned Scorer      →  Logistic regression over 9 signals → P(hallucinated)
+        │
         ▼
  Verdict + Explanation
  { "verdict": "REAL" | "SUSPICIOUS" | "HALLUCINATED",
+   "confidence": float,
    "exists": bool,
    "semantic_score": float,
    "density_score": int,
+   "pagerank_score": float,
+   "cross_jaccard_score": float,
    "llm_check": { "is_accurate": bool, "reason": str } }
 ```
 
 **Verdict logic:**
 
-- Layer 1 FAIL → **HALLUCINATED** immediately
-- Layer 1 PASS + L2a PASS + L2b PASS + L3 PASS → **REAL**
-- Layer 1 PASS + any of L2a / L2b / L3 FAIL → **SUSPICIOUS**
+- Layer 1 FAIL → **HALLUCINATED** immediately (case not in graph)
+- Layer 4 FAIL → **HALLUCINATED** immediately (year/court mismatch)
+- All hard checks PASS + P(hallucinated) < 0.40 → **REAL**
+- All hard checks PASS + P(hallucinated) ≥ 0.40 → **SUSPICIOUS**
+- All hard checks PASS + P(hallucinated) ≥ 0.70 → **HALLUCINATED**
 
-Each layer catches a distinct failure mode. Layer 1 catches fabricated citations
-that don't exist anywhere in the legal corpus. Layer 2a catches off-domain
-propositions that are semantically inconsistent with Fourth Amendment doctrine.
-Layer 2b catches Type B hallucinations — real cases misrepresented with a wrong
-holding — which embedding similarity alone cannot detect. Layer 3 catches
-isolated nodes that exist in the graph but have no citation footprint, a signal
-that the case may have been inserted without genuine legal context.
+Each signal catches a distinct failure mode. Layer 1 catches fabricated citations
+that don't exist anywhere in the legal corpus. Layer 4 catches Type B hallucinations
+— real cases with a corrupted year or court identifier — before any expensive
+computation. The name check catches party-name swaps; temporal check catches
+anachronistic citations. Layer 2a provides semantic domain filtering; Layer 2b uses
+an LLM to verify the specific proposition attributed to the case. Layer 3 scores
+citation density and PageRank authority. Cross-citation signals flag doctrinal
+incoherence across multiple citations in the same document. The learned scorer fuses
+all nine signals into a calibrated P(hallucinated) probability.
 
 ---
 
@@ -131,16 +157,19 @@ Verit/
 │
 ├── benchmark/
 │   ├── __init__.py
-│   ├── benchmark.json              # 500-citation evaluation dataset (250 real / 250 hallucinated)
+│   ├── benchmark.json              # 835-citation evaluation dataset (418 real / 417 hallucinated)
 │   ├── cross_validate.py           # 10-fold stratified cross-validation
 │   ├── cv_report.json              # Cross-validation results
 │   ├── density_histogram.py        # Layer 3 density score distribution plot
 │   ├── eval_report.json            # Test-set evaluation results
-│   ├── evaluate.py                 # Threshold sweep on validation set
-│   ├── expanded_benchmark.py       # Expands benchmark from 200 → 500 entries
+│   ├── evaluate.py                 # Threshold sweep on validation set; writes raw_scores.csv
+│   ├── expanded_benchmark.py       # Expands benchmark from 200 → 835 entries
 │   ├── generate_benchmark.py       # Builds initial 200-citation benchmark
+│   ├── raw_scores.csv              # Per-entry feature signals logged by evaluate.py (scorer training data)
 │   ├── report.py                   # Runs inference on held-out test set
+│   ├── scorer.pkl                  # Trained logistic regression scorer (Phase 3)
 │   ├── split_indices.json          # Cached 80/20 val/test split (never reshuffled)
+│   ├── train_scorer.py             # Trains logistic regression on raw_scores.csv; saves scorer.pkl
 │   └── tuned_thresholds.json       # Best threshold combo from evaluate.py sweep
 │
 ├── data/
@@ -149,6 +178,8 @@ Verit/
 │   ├── data_check.py               # Quick corpus sanity checks
 │   ├── diagnose_batches.py         # Diagnose batch merge issues
 │   ├── diagnose_text.py            # Inspect plain-text coverage
+│   ├── enrich_case_id.py           # Backfills case_id into cases_enriched.parquet
+│   ├── enrich_landmark.py          # Fetches + embeds landmark opinions; upserts Neo4j + Milvus
 │   ├── fetch_all_opinions.py       # Fetches full plain_text for each case
 │   ├── fetch_cases.py              # CourtListener API ingestion (4th Amendment filter)
 │   ├── merge_batches.py            # Deduplicates and merges batch JSONs
@@ -169,19 +200,26 @@ Verit/
 ├── db/
 │   ├── __init__.py
 │   ├── backfill_court_id.py        # One-time migration: writes court_id to Neo4j nodes
+│   ├── compute_pagerank.py         # Power-iteration PageRank; writes pagerank to Case nodes
 │   ├── fetch_landmarks.py          # Fetches SCOTUS landmark cases from CourtListener
 │   ├── graph_loader.py             # Bulk loads corpus into Neo4j (nodes + CITES edges)
+│   ├── load_doctrines.py           # Pushes [:APPLIES_DOCTRINE] edges to :Doctrine nodes
 │   └── neo4j_client.py             # Neo4j Bolt connection helper
 │
 ├── detector/
 │   ├── __init__.py
 │   ├── cache.py                    # TTLCache for embeddings and ANN results
-│   ├── connectivity_check.py       # Layer 3 — citation density score via Neo4j
+│   ├── connectivity_check.py       # Layer 3 — citation density + PageRank score via Neo4j
+│   ├── cross_citation.py           # Jaccard similarity + shortest-hop distance across citations
+│   ├── doctrine_check.py           # Doctrine coherence via [:APPLIES_DOCTRINE] Neo4j edges
 │   ├── existence_check.py          # Layer 1 — Neo4j node lookup by cluster ID
 │   ├── eyecite_parser.py           # EyeCite extraction + CourtListener cluster ID resolution
+│   ├── llm_check.py                # Layer 2b — Claude Haiku proposition accuracy check
 │   ├── metadata_check.py           # Layer 4 — year and court validation against Neo4j node
-│   ├── pipeline.py                 # Orchestrates all four layers; returns CitationVerdict
-│   └── semantic_check.py           # Layer 2 — hybrid ANN (Milvus) + BM25 via RRF
+│   ├── name_check.py               # Party name fuzzy-match via rapidfuzz
+│   ├── pipeline.py                 # Orchestrates all layers + learned scorer; returns CitationVerdict
+│   ├── semantic_check.py           # Layer 2a — hybrid ANN (Milvus) + BM25 via RRF
+│   └── temporal_check.py           # Future-citation and year-inversion temporal sanity checks
 │
 ├── embeddings/
 │   ├── __init__.py
@@ -202,6 +240,7 @@ Verit/
 │
 ├── preprocessing/
 │   ├── __init__.py
+│   ├── classify_doctrines.py       # Classifies opinion text against 4th Amendment concept keywords
 │   ├── clean_text.py               # HTML stripping, header/footer removal, [CITATION] normalization
 │   └── tokenize_bm25.py            # spaCy lemmatization for BM25 token corpus
 │
@@ -1329,8 +1368,7 @@ To activate the scorer, run in order:
 
 #### Step 4.1 — PageRank Authority Weighting
 
-- Added `db/compute_pagerank.py` — projects the `Case→CITES` graph into the
-  Neo4j GDS in-memory store, runs PageRank (damping=0.85, maxIterations=20),
+- Added `db/compute_pagerank.py` — pulls the Case→CITES edge list via Cypher, computes PageRank via pure-Python power iteration (no GDS plugin required) (damping=0.85, max_iter=100),
   writes scores back to Case nodes as the `pagerank` property, then drops the
   GDS projection to free memory. Fully idempotent (re-runnable after graph updates).
   Run once before retraining: `python -m db.compute_pagerank`
@@ -1346,8 +1384,6 @@ To activate the scorer, run in order:
   updated to include `pagerank_score` between `density_score` and `metadata_valid`.
 - Updated `benchmark/train_scorer.py` — `FEATURES` list and `X_df` builder include
   `pagerank_score` (filled with 0.0 when missing — conservative lower bound).
-- Updated `config.py` — added `GDS_GRAPH_NAME = "verit-case-graph"` as a single
-  source of truth for all GDS projection commands.
 - Updated `api/main.py` — `ConfidenceSignals` gains `pagerank_score: Optional[float]`;
   populated from `v.connectivity.pagerank_score` in `_verdict_to_response()`.
 
@@ -1403,6 +1439,97 @@ To activate PageRank scoring:
 - Added `db/load_doctrines.py` to push `[:APPLIES_DOCTRINE]` relationships to `:Doctrine` nodes in Neo4j.
 - Added `detector/doctrine_check.py` to expose `has_doctrines` and `mean_shared_doctrines` for cross-citation coherence.
 - Updated `api/main.py` and `detector/pipeline.py` to expose these new doctrine signals.
+
+## Future Work
+
+The following extensions were designed and evaluated during development but deferred due to
+implementation complexity or timeline constraints. Both are well-specified and ready for
+a follow-on implementation sprint.
+
+---
+
+### Typed Citation Relationships
+
+The current graph uses a single `[:CITES]` edge for every citation, regardless of how one
+case actually treats another. In legal practice, citations carry distinct semantic weight:
+
+| Relationship | Meaning | Hallucination signal |
+| --- | --- | --- |
+| `[:FOLLOWS]` | Case A directly applies the holding of Case B | Baseline — strong coherence |
+| `[:DISTINGUISHES]` | Case A cites Case B but reaches a different outcome | Weak — depends on context |
+| `[:OVERRULES]` | Case A explicitly nullifies Case B's holding | **Strong** — citing an overruled case is always an error |
+| `[:EXTENDS]` | Case A expands Case B's holding to new facts | Baseline — coherent extension |
+
+`OVERRULED` in particular is a near-zero-false-positive hallucination signal: if an LLM
+cites a case that has been explicitly overruled by another case in the same brief, that is
+a detectable error that no current layer catches.
+
+**Data sources available now:**
+
+- CourtListener's `/opinions-cited/` endpoint exposes a `treatment` field per citation edge
+- EyeCite identifies negative treatment markers inline (`"but see"`, `"distinguished by"`,
+  `"overruled by"`) from raw opinion text — coverage is better than the API field for
+  pre-2015 cases
+
+**Implementation path:**
+
+1. Re-fetch per-case citation relationships from CourtListener `/opinions-cited/` with the
+   `treatment` field, or run EyeCite treatment extraction over `cases_enriched.parquet`
+2. Store type as an edge property to avoid Neo4j's variable-relationship-type limitation:
+   ```cypher
+   MERGE (a)-[:CITES {type: 'OVERRULES'}]->(b)
+   ```
+3. Update `db/graph_loader.py` to write typed edges during ingestion
+4. Update `detector/cross_citation.py` Jaccard and shortest-path queries to differentiate
+   positive (`FOLLOWS`, `EXTENDS`) from negative (`OVERRULES`, `DISTINGUISHES`) citations
+5. Add a new hard rule to `detector/pipeline.py`: if target case is `OVERRULED` by any
+   case in the same document → HALLUCINATED immediately
+
+**Why deferred:** CourtListener treatment data is sparsely populated for pre-2015 cases.
+Full coverage requires EyeCite parsing over all 1,353 opinions and a complete rebuild of
+all 30,806 edges. Risk is medium-high relative to the remaining timeline.
+
+---
+
+### Court Hierarchy Nodes
+
+Court information is currently stored as a flat property on `Case` nodes (`court_id`).
+Modeling the federal court hierarchy as a graph structure would enable precedential
+authority weighting — a citation to a SCOTUS opinion carries more authority than a
+citation to a district court, and the PageRank computation should reflect that.
+
+```cypher
+(:Court {id: "scotus"})
+(:Court {id: "ca9"})-[:BOUND_BY]->(:Court {id: "scotus"})
+(:Court {id: "ca4"})-[:BOUND_BY]->(:Court {id: "scotus"})
+(case:Case)-[:FILED_IN]->(:Court {id: "ca9"})
+```
+
+**What this enables:**
+
+- **Weighted PageRank** — `db/compute_pagerank.py` could weight `CITES` edges by the
+  cited case's court authority level rather than treating all edges equally
+- **Binding vs. persuasive authority** — a 9th Circuit brief citing a 5th Circuit case
+  is persuasive but not binding; the graph could model and surface that distinction
+- **Citation graph visualization** — court hierarchy as a structural overlay in the
+  PyVis graph, with court-level color coding
+
+**Implementation path:**
+
+1. Add `db/load_courts.py` — hardcode the federal court hierarchy mapping (static data,
+   no API calls required; ~100 federal courts)
+2. Create `:Court` nodes and `[:BOUND_BY]` edges in Neo4j
+3. Add `[:FILED_IN]` edges from each `Case` node to its `Court` node (court IDs already
+   present on all 1,353 nodes via `backfill_court_id.py`)
+4. Update `db/compute_pagerank.py` to weight edges by cited case's court authority level
+5. Retrain `benchmark/scorer.pkl` with the updated PageRank feature distribution
+
+**Why deferred:** Layer 4 already validates court identity at the metadata level, so the
+marginal detection improvement over the current F1 is small. The weighted PageRank change
+would invalidate the trained `scorer.pkl`, requiring a full benchmark re-run and retraining.
+Court hierarchy adds the most value as a visualization enhancement rather than a detection signal.
+
+---
 
 ## Acknowledgements
 
