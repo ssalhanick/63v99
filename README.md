@@ -1430,9 +1430,9 @@ To activate PageRank scoring:
 - Updated `embeddings/milvus_index.py` to support `chunk_index` in the Milvus schema.
 - Updated `detector/semantic_check.py` to aggregate chunk-level ANN hits dynamically using max-pooling.
 
-#### Step 5.2 — Circuit-Aware Retrieval
-- Updated `api/main.py` to accept an optional `jurisdiction` parameter in the payload.
-- Updated `detector/semantic_check.py` to dynamically apply a post-search court filter to both dense and sparse hits.
+#### Step 5.2 — Circuit-Aware Retrieval (removed)
+- This experiment was removed to simplify runtime behavior and keep Layer 2a retrieval corpus-wide.
+- The API no longer accepts a `jurisdiction` parameter, and semantic retrieval no longer applies post-search court filtering.
 
 #### Step 5.3 — Doctrine Node Ontology
 - Added `preprocessing/classify_doctrines.py` to classify text against Fourth Amendment concept keywords.

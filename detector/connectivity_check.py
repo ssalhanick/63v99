@@ -52,6 +52,7 @@ class ConnectivityResult:
     density_score:  int             # number of shared citations with corpus cases
     is_connected:   bool            # density_score >= CITATION_DENSITY_THRESHOLD
     pagerank_score: Optional[float] # GDS PageRank authority score (None until computed)
+    is_landmark:    bool = False    # True for curated SCOTUS anchor cases
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +74,7 @@ def check_connectivity(case_id: Optional[int], driver=None) -> ConnectivityResul
     """
     if case_id is None:
         logger.debug("case_id is None — skipping connectivity check")
-        return ConnectivityResult(density_score=0, is_connected=False, pagerank_score=None)
+        return ConnectivityResult(density_score=0, is_connected=False, pagerank_score=None, is_landmark=False)
 
     close_after = driver is None
     if close_after:
@@ -90,15 +91,18 @@ def check_connectivity(case_id: Optional[int], driver=None) -> ConnectivityResul
                       <-[:CITES]-(corpus:Case {stub: false})
                 WITH count(DISTINCT shared) AS density
                 MATCH (c:Case {id: $id})
-                RETURN density, c.pagerank AS pagerank
+                RETURN density, c.pagerank AS pagerank, coalesce(c.landmark, false) AS landmark
                 """,
                 id=case_id,
             )
             record = result.single()
             density  = int(record["density"])            if record else 0
             pagerank = float(record["pagerank"])         if (record and record["pagerank"] is not None) else None
+            landmark = bool(record["landmark"])          if record else False
 
-        is_connected = density >= CITATION_DENSITY_THRESHOLD
+        # Landmark SCOTUS anchors can be structurally sparse in a federal-circuit-only
+        # corpus; treat landmark status as connectivity-pass to avoid false SUSPICIOUS.
+        is_connected = landmark or (density >= CITATION_DENSITY_THRESHOLD)
 
         if is_connected:
             logger.info(
@@ -117,11 +121,12 @@ def check_connectivity(case_id: Optional[int], driver=None) -> ConnectivityResul
             density_score=density,
             is_connected=is_connected,
             pagerank_score=pagerank,
+            is_landmark=landmark,
         )
 
     except Exception as e:
         logger.error("Neo4j connectivity query error for case_id %s: %s", case_id, e)
-        return ConnectivityResult(density_score=0, is_connected=False, pagerank_score=None)
+        return ConnectivityResult(density_score=0, is_connected=False, pagerank_score=None, is_landmark=False)
 
     finally:
         if close_after:

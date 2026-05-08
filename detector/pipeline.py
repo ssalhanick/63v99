@@ -35,6 +35,7 @@ import numpy as np
 from neo4j import GraphDatabase
 
 from config import NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, SCORER_PATH
+from config import CITATION_DENSITY_THRESHOLD
 from detector.eyecite_parser import parse_citations, ResolvedCitation
 from detector.existence_check import check_existence
 from detector.semantic_check import semantic_check, SemanticResult
@@ -112,6 +113,8 @@ class CitationVerdict:
 
     # Context passed to layers
     context_text:    str
+    p_hallucinated:  Optional[float] = None         # scorer probability (None when hard-gated/fallback)
+    scorer_breakdown: Optional[dict] = None         # per-feature contributions when scorer runs
 
     # Top corpus matches from Layer 2a
     top_matches:     list[dict] = field(default_factory=list)
@@ -135,7 +138,7 @@ def _compute_verdict(
     metadata:     Optional[MetadataResult],
     name_check:   Optional[NameCheckResult],
     temporal:     Optional[TemporalResult],
-) -> str:
+) -> tuple[str, Optional[float], Optional[dict]]:
     """
     Compute the final verdict using the learned scorer if available,
     otherwise fall back to boolean threshold fusion.
@@ -145,15 +148,15 @@ def _compute_verdict(
       - Layer 4 FAIL  → HALLUCINATED
     """
     if not exists:
-        return HALLUCINATED
+        return HALLUCINATED, None, None
 
     # L4: metadata mismatch is always a hard HALLUCINATED signal
     if metadata is not None and metadata.checked and not metadata.is_valid:
-        return HALLUCINATED
+        return HALLUCINATED, None, None
 
     # L2b: LLM explicitly rejected the proposition -> hard SUSPICIOUS signal
     if llm_result is not None and not llm_result.skipped and not llm_result.is_accurate:
-        return SUSPICIOUS
+        return SUSPICIOUS, None, None
 
     # --- Attempt learned scorer ---
     bundle = _get_scorer()
@@ -166,23 +169,58 @@ def _compute_verdict(
             semantic.rrf_score          if semantic                       else 0.0,
             semantic.top_dense_score    if semantic                       else 0.0,
             semantic.case_sim           if semantic and semantic.case_sim is not None else 0.0,
-            float(connectivity.density_score) if connectivity             else 0.0,
+            # Landmark anchors can have low local density in this corpus; avoid
+            # penalizing them as disconnected in the learned scorer feature vector.
+            float(
+                max(connectivity.density_score, CITATION_DENSITY_THRESHOLD)
+                if (connectivity and getattr(connectivity, "is_landmark", False))
+                else (connectivity.density_score if connectivity else 0.0)
+            ),
             float(connectivity.pagerank_score) if (connectivity and connectivity.pagerank_score is not None) else 0.0,
             name_check.score            if name_check and name_check.checked else 1.0,
             float(temporal.is_valid)    if temporal  and temporal.checked else 1.0,
         ]])
+        feature_names = bundle.get("features") or [
+            "rrf_score",
+            "dense_score",
+            "case_sim",
+            "density_score",
+            "pagerank_score",
+            "name_score",
+            "temporal_valid",
+        ]
         # Backward-compat guard: trim to stored model's expected width if needed
         # (e.g. loading a Phase 3 9-feature pkl against the new 7-feature vector).
         expected_n = scaler.n_features_in_
         if x.shape[1] > expected_n:
             x = x[:, :expected_n]
-        p_hallucinated = model.predict_proba(scaler.transform(x))[0][1]
+        feature_names = feature_names[:expected_n]
+        x_scaled = scaler.transform(x)
+        coefs = model.coef_[0][:expected_n]
+        intercept = float(model.intercept_[0])
+        contributions = (x_scaled[0] * coefs).tolist()
+        logit = intercept + float(np.sum(contributions))
+        p_hallucinated = model.predict_proba(x_scaled)[0][1]
+        scorer_breakdown = {
+            "logit": logit,
+            "intercept": intercept,
+            "features": [
+                {
+                    "name": feature_names[i],
+                    "raw": float(x[0][i]),
+                    "scaled": float(x_scaled[0][i]),
+                    "coef": float(coefs[i]),
+                    "contribution": float(contributions[i]),
+                }
+                for i in range(expected_n)
+            ],
+        }
         logger.info("Scorer P(hallucinated)=%.4f", p_hallucinated)
         if p_hallucinated >= _P_HALLUCINATED:
-            return HALLUCINATED
+            return HALLUCINATED, p_hallucinated, scorer_breakdown
         if p_hallucinated >= _P_SUSPICIOUS:
-            return SUSPICIOUS
-        return REAL
+            return SUSPICIOUS, p_hallucinated, scorer_breakdown
+        return REAL, p_hallucinated, scorer_breakdown
 
 
     # --- Boolean fallback ---
@@ -193,16 +231,16 @@ def _compute_verdict(
     temp_ok  = temporal.is_valid             if temporal   and temporal.checked       else True
 
     if l2a and l2b and l3 and name_ok and temp_ok:
-        return REAL
+        return REAL, None, None
     else:
-        return SUSPICIOUS
+        return SUSPICIOUS, None, None
 
 
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
 
-def run_pipeline(text: str, court_filter: Optional[list[str]] = None) -> list[CitationVerdict]:
+def run_pipeline(text: str) -> list[CitationVerdict]:
     """
     Run the full hallucination detection pipeline on raw AI-generated text.
 
@@ -247,6 +285,8 @@ def run_pipeline(text: str, court_filter: Optional[list[str]] = None) -> list[Ci
                     name_check      = None,
                     temporal        = None,
                     verdict         = HALLUCINATED,
+                    p_hallucinated  = None,
+                    scorer_breakdown = None,
                     context_text    = citation.context_text,
                     top_matches     = [],
                 ))
@@ -281,6 +321,8 @@ def run_pipeline(text: str, court_filter: Optional[list[str]] = None) -> list[Ci
                     name_check      = name,
                     temporal        = temporal,
                     verdict         = HALLUCINATED,
+                    p_hallucinated  = None,
+                    scorer_breakdown = None,
                     context_text    = citation.context_text,
                     top_matches     = [],
                 ))
@@ -290,7 +332,6 @@ def run_pipeline(text: str, court_filter: Optional[list[str]] = None) -> list[Ci
             semantic = semantic_check(
                 citation.context_text,
                 case_id=citation.case_id,
-                court_filter=court_filter,
             )
 
             # Layer 2b — LLM proposition accuracy check
@@ -305,7 +346,9 @@ def run_pipeline(text: str, court_filter: Optional[list[str]] = None) -> list[Ci
             connectivity = check_connectivity(citation.case_id, driver=driver)
 
             # Final verdict
-            verdict = _compute_verdict(exists, semantic, llm_result, connectivity, meta, name, temporal)
+            verdict, p_hallucinated, scorer_breakdown = _compute_verdict(
+                exists, semantic, llm_result, connectivity, meta, name, temporal
+            )
 
             logger.info(
                 "Verdict: %s | L1=%s L4=%s L2a=%s (rrf=%.4f) L2b=%s L3=%s (density=%d) name=%.2f temp=%s",
@@ -333,6 +376,8 @@ def run_pipeline(text: str, court_filter: Optional[list[str]] = None) -> list[Ci
                 name_check      = name,
                 temporal        = temporal,
                 verdict         = verdict,
+                p_hallucinated  = p_hallucinated,
+                scorer_breakdown = scorer_breakdown,
                 context_text    = citation.context_text,
                 top_matches     = semantic.top_matches,
             ))

@@ -36,6 +36,20 @@ st.set_page_config(
 API_URL         = "http://localhost:8000/check-citation"
 REQUEST_TIMEOUT = 60
 
+# Neo4j Browser deep link (cmd=edit pre-fills the editor — same pattern as Citation Graph tab).
+NEO4J_BROWSER_BASE = "http://localhost:7474/browser/?cmd=edit&arg="
+# Used when there is no selected case_id (no prior check, or no REAL/SUSPICIOUS cites).
+NEO4J_DEFAULT_BROWSER_CYPHER = (
+    "MATCH (c:Case)\n"
+    "RETURN c\n"
+    "LIMIT 50"
+)
+
+
+def _neo4j_browser_edit_url(cypher: str) -> str:
+    return NEO4J_BROWSER_BASE + urllib.parse.quote(cypher)
+
+
 VERDICT_BADGE = {
     "REAL":         ("🟢", "#2e7d32", "Real"),
     "SUSPICIOUS":   ("🟡", "#e65100", "Suspicious"),
@@ -88,10 +102,8 @@ def _load_umap():
 
 # ── API helper ────────────────────────────────────────────────────────────────
 
-def call_api(text: str, jurisdiction: str = None) -> dict:
+def call_api(text: str) -> dict:
     payload = {"text": text}
-    if jurisdiction and jurisdiction != "All":
-        payload["jurisdiction"] = jurisdiction
     response = requests.post(API_URL, json=payload, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
@@ -114,7 +126,7 @@ def render_summary(citations: list[dict]) -> None:
     st.divider()
 
 
-def render_citation_result(citation: dict, show_llm: bool) -> None:
+def render_citation_result(citation: dict, show_llm: bool, show_feature_makeup: bool) -> None:
     """Render one citation card. If show_llm=True, stream Haiku explanation after."""
     verdict         = citation.get("verdict", "UNKNOWN")
     citation_string = citation.get("citation_string", "Unknown")
@@ -124,11 +136,13 @@ def render_citation_result(citation: dict, show_llm: bool) -> None:
     top_matches     = citation.get("top_matches", [])
     context_text    = citation.get("context_text", "")
     llm_check       = citation.get("llm_check")
+    signals         = citation.get("confidence_signals") or {}
+    p_hall          = signals.get("p_hallucinated")
 
     emoji, color, label = VERDICT_BADGE.get(verdict, ("⚪", "gray", verdict))
 
     with st.container():
-        col_v, col_c, col_s, col_d, col_docs = st.columns([1.5, 3, 1.2, 1.2, 1.5])
+        col_v, col_c, col_s, col_d, col_p, col_docs = st.columns([1.4, 3, 1.1, 1.1, 1.1, 1.3])
 
         with col_v:
             st.markdown(
@@ -156,7 +170,6 @@ def render_citation_result(citation: dict, show_llm: bool) -> None:
             )
             
         with col_docs:
-            signals = citation.get("confidence_signals") or {}
             has_docs = signals.get("has_doctrines")
             shared = signals.get("mean_shared_doctrines")
             val = f"{shared:.1f}" if shared is not None else ("Yes" if has_docs else "No")
@@ -164,8 +177,42 @@ def render_citation_result(citation: dict, show_llm: bool) -> None:
                 label="Doctrines",
                 value=val if has_docs is not None else "—",
             )
+        with col_p:
+            st.metric(
+                label="P(Hall)",
+                value=f"{p_hall:.3f}" if p_hall is not None else "—",
+            )
 
         st.caption("✅ Found in graph" if existence else "❌ Not found in graph")
+        if signals.get("scorer_used") is False:
+            st.caption("Scorer probability unavailable (hard gate or fallback path).")
+        elif show_feature_makeup:
+            breakdown = signals.get("scorer_breakdown") or {}
+            rows = breakdown.get("features") or []
+            if rows:
+                with st.expander("Model feature makeup", expanded=False):
+                    st.caption(
+                        "Contribution is in log-odds space. Positive values push toward "
+                        "hallucinated; negative values push toward real."
+                    )
+                    st.dataframe(
+                        [
+                            {
+                                "feature": r.get("name"),
+                                "raw": round(float(r.get("raw", 0.0)), 4),
+                                "scaled": round(float(r.get("scaled", 0.0)), 4),
+                                "coef": round(float(r.get("coef", 0.0)), 4),
+                                "contribution": round(float(r.get("contribution", 0.0)), 4),
+                            }
+                            for r in rows
+                        ],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.caption(
+                        f"logit={float(breakdown.get('logit', 0.0)):.4f} · "
+                        f"intercept={float(breakdown.get('intercept', 0.0)):.4f}"
+                    )
 
         # ── Layer 2b LLM reason ───────────────────────────────────────────────
         if llm_check and not llm_check.get("skipped"):
@@ -271,18 +318,13 @@ with tab_checker:
         label_visibility="collapsed",
     )
 
-    col_jur, col_btn, col_toggle = st.columns([1, 2, 1])
-    with col_jur:
-        jurisdiction = st.selectbox(
-            "Jurisdiction Filter",
-            options=["All", "ohioctapp", "indctapp", "tenncrimapp", "ncctapp"],
-            index=0,
-            label_visibility="collapsed"
-        )
+    col_btn, col_toggle, col_dbg = st.columns([2, 1, 1])
     with col_btn:
         check_button = st.button("🔍 Check Citations", type="primary", use_container_width=True)
     with col_toggle:
         show_llm = st.toggle("🤖 Haiku explanations", value=True)
+    with col_dbg:
+        show_feature_makeup = st.toggle("🧮 feature makeup", value=False)
 
     st.divider()
 
@@ -292,7 +334,7 @@ with tab_checker:
         else:
             with st.spinner("Running citation checks..."):
                 try:
-                    result    = call_api(input_text, jurisdiction)
+                    result    = call_api(input_text)
                     citations = result.get("citations", [])
                 except requests.exceptions.ConnectionError:
                     st.error("Cannot connect to the Verit API. Make sure FastAPI is running on localhost:8000.")
@@ -315,16 +357,21 @@ with tab_checker:
                 st.subheader("Citation Details")
 
                 # Column headers
-                h1, h2, h3, h4, h5 = st.columns([1.5, 3, 1.2, 1.2, 1.5])
+                h1, h2, h3, h4, h5, h6 = st.columns([1.4, 3, 1.1, 1.1, 1.1, 1.3])
                 h1.markdown("**Verdict**")
                 h2.markdown("**Citation**")
                 h3.markdown("**Semantic**")
                 h4.markdown("**Density**")
-                h5.markdown("**Doctrines**")
+                h5.markdown("**P(Hall)**")
+                h6.markdown("**Doctrines**")
                 st.divider()
 
                 for citation in citations:
-                    render_citation_result(citation, show_llm=show_llm)
+                    render_citation_result(
+                        citation,
+                        show_llm=show_llm,
+                        show_feature_makeup=show_feature_makeup,
+                    )
             elif "citations" in result if 'result' in dir() else False:
                 st.info("No citations were extracted from the provided text.")
 
@@ -348,7 +395,7 @@ with tab_map:
 
     color_by = st.radio(
         "Color by",
-        options=["circuit", "year"],
+        options=["circuit", "year", "doctrine"],
         horizontal=True,
         label_visibility="collapsed",
     )
@@ -374,12 +421,34 @@ with tab_map:
         if color_by != "circuit":
             try:
                 import plotly.express as px
+                if color_by == "doctrine" and "doctrine" not in df.columns:
+                    # Session cache may still hold a pre-doctrine dataframe.
+                    # Keep the plot working; a rerun/reload will repopulate labels.
+                    df = df.copy()
+                    df["doctrine"] = "No doctrine"
                 fig = px.scatter(
                     df,
                     x="x", y="y",
                     color=color_by,
                     hover_name="name",
-                    hover_data={"x": False, "y": False, "court_id": True, "year": True, "cite_count": True},
+                    hover_data=(
+                        {
+                            "x": False,
+                            "y": False,
+                            "court_id": True,
+                            "year": True,
+                            "doctrine": True,
+                            "cite_count": True,
+                        }
+                        if "doctrine" in df.columns
+                        else {
+                            "x": False,
+                            "y": False,
+                            "court_id": True,
+                            "year": True,
+                            "cite_count": True,
+                        }
+                    ),
                     title=f"Verit Corpus — UMAP Embedding Space (colored by {color_by})",
                     labels={"x": "UMAP-1", "y": "UMAP-2"},
                     template="plotly_white",
@@ -413,9 +482,16 @@ with tab_graph:
         "🔴 Submitted case · 🟡 Landmark · 🔵 Corpus · ⚫ Stub"
     )
 
-    # Guard: need a prior check result
+    _neo4j_default_url = _neo4j_browser_edit_url(NEO4J_DEFAULT_BROWSER_CYPHER)
+
+    # Citation graph needs a prior check; Neo4j Browser is always available.
     if "last_citations" not in st.session_state or not st.session_state["last_citations"]:
-        st.info("Run a citation check in the ⚖️ Citation Checker tab first.")
+        st.info("Run a citation check in the ⚖️ Citation Checker tab first to explore a subgraph.")
+        st.link_button("🔍 Open in Neo4j Browser", _neo4j_default_url)
+        st.caption(
+            "Opens Neo4j Browser with a starter query (`MATCH (c:Case) …`). "
+            "Replace it with any Cypher in the editor."
+        )
     else:
         # Filter to only REAL / SUSPICIOUS — HALLUCINATED are not in Neo4j
         graphable = [
@@ -425,6 +501,11 @@ with tab_graph:
 
         if not graphable:
             st.info("No REAL or SUSPICIOUS citations in the last check result.")
+            st.link_button("🔍 Open in Neo4j Browser", _neo4j_default_url)
+            st.caption(
+                "Opens Neo4j Browser with a starter query. "
+                "HALLUCINATED citations are not in the corpus graph."
+            )
         else:
             # ── Controls ──────────────────────────────────────────────────────
             col_drop, col_hops = st.columns([4, 1])
@@ -463,27 +544,29 @@ with tab_graph:
                 with st.spinner("Querying Neo4j and building graph..."):
                     graph_result = render_graph_html(case_id, hops=hops)
 
+                # Neo4j Browser: always offer a deep link so you can inspect the node
+                # even when the citation subgraph is empty (no outgoing CITES edges).
+                cypher_explore = (
+                    f"OPTIONAL MATCH path_out = (c:Case {{id: {case_id}}})-[:CITES*1..{hops}]->(n:Case)\n"
+                    f"OPTIONAL MATCH path_in = (m:Case)-[:CITES*1..{hops}]->(c)\n"
+                    f"RETURN c, collect(DISTINCT path_out) AS outgoing, collect(DISTINCT path_in) AS incoming\n"
+                    f"LIMIT 50"
+                )
+                neo4j_explore_url = _neo4j_browser_edit_url(cypher_explore)
+
                 if graph_result is None:
                     st.warning(
                         f"No citation relationships found in Neo4j for case ID {case_id}. "
-                        "The case may exist as a node but have no outgoing CITES edges."
+                        "The case may exist as a node but have no matching CITES paths in this subgraph query."
                     )
+                    st.link_button("🔍 Open in Neo4j Browser", neo4j_explore_url)
                 else:
                     html, node_count, edge_count = graph_result
                     st.caption(f"**{node_count}** nodes · **{edge_count}** edges · {hops}-hop neighborhood")
                     st.components.v1.html(html, height=620, scrolling=False)
 
-                    # ── Neo4j Browser button ──────────────────────────────────
-                    import urllib.parse
-                    cypher = (
-                        f"MATCH path = (c:Case {{id: {case_id}}})-[:CITES*1..2]->(neighbor:Case)\n"
-                        f"RETURN path\n"
-                        f"LIMIT 100"
-                    )
-                    encoded = urllib.parse.quote(cypher)
-                    neo4j_url = f"http://localhost:7474/browser/?cmd=edit&arg={encoded}"
-
-                    st.link_button("🔍 Open in Neo4j Browser", neo4j_url)
+                    # ── Neo4j Browser button (same explorer query as empty-graph path) ──
+                    st.link_button("🔍 Open in Neo4j Browser", neo4j_explore_url)
 
             except Exception as e:
                 st.error(f"Graph render failed: {e}")

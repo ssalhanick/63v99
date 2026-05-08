@@ -397,7 +397,6 @@ def semantic_check(
     context_text: str,
     top_k: int = TOP_K,
     case_id: int = None,
-    court_filter: list[str] = None
 ) -> SemanticResult:
     _load_all()
 
@@ -408,19 +407,7 @@ def semantic_check(
     dense_hits = _dense_search(query_vector, top_k=top_k)
 
     # 3. BM25 sparse search
-    sparse_hits = _bm25_search(context_text, top_k=top_k * 5 if court_filter else top_k)
-
-    # Apply court filter if provided
-    if court_filter:
-        court_filter_set = set(court_filter)
-        dense_hits = [
-            (cid, score) for cid, score in dense_hits
-            if cid in _metadata_df.index and str(_metadata_df.loc[cid, "court_id"]) in court_filter_set
-        ]
-        sparse_hits = [
-            (cid, score) for cid, score in sparse_hits
-            if cid in _metadata_df.index and str(_metadata_df.loc[cid, "court_id"]) in court_filter_set
-        ]
+    sparse_hits = _bm25_search(context_text, top_k=top_k)
 
     # 4. RRF fusion
     fused = _rrf_fuse(dense_hits, sparse_hits)

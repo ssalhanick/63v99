@@ -64,7 +64,6 @@ app.add_middleware(
 
 class CheckCitationRequest(BaseModel):
     text: str
-    jurisdiction: Optional[str] = None
 
     class Config:
         json_schema_extra = {
@@ -72,8 +71,7 @@ class CheckCitationRequest(BaseModel):
                 "text": (
                     "In Terry v. Ohio, 392 U.S. 1 (1968), the Court held that "
                     "a brief investigatory stop requires reasonable articulable suspicion."
-                ),
-                "jurisdiction": "ca9"
+                )
             }
         }
 
@@ -109,6 +107,10 @@ class ConfidenceSignals(BaseModel):
     min_hop_distance:   Optional[int]     # shortest CITES path to co-citation (Phase 4.3)
     has_doctrines:      Optional[bool]    # has >= 1 doctrine label (Phase 5.3)
     mean_shared_doctrines: Optional[float] # mean shared doctrines with co-citations (Phase 5.3)
+    p_hallucinated:    Optional[float]      # logistic regression output when scorer is used
+    p_real:            Optional[float]      # derived as 1 - p_hallucinated
+    scorer_used:       bool                 # False when hard gate or boolean fallback path
+    scorer_breakdown:  Optional[dict]       # per-feature contribution details for UI drilldown
 
 
 class CitationResult(BaseModel):
@@ -174,6 +176,10 @@ def _verdict_to_response(v: CitationVerdict) -> CitationResult:
         min_hop_distance     = v.min_hop_distance,
         has_doctrines        = v.has_doctrines,
         mean_shared_doctrines= v.mean_shared_doctrines,
+        p_hallucinated       = v.p_hallucinated,
+        p_real               = (1.0 - v.p_hallucinated) if v.p_hallucinated is not None else None,
+        scorer_used          = v.p_hallucinated is not None,
+        scorer_breakdown     = v.scorer_breakdown,
     )
 
     return CitationResult(
@@ -221,8 +227,7 @@ def check_citation(request: CheckCitationRequest):
     logger.info("Received /check-citation request (%d chars)", len(request.text))
 
     try:
-        court_filter = [request.jurisdiction] if request.jurisdiction else None
-        verdicts = run_pipeline(request.text, court_filter=court_filter)
+        verdicts = run_pipeline(request.text)
     except Exception as e:
         logger.exception("Pipeline error: %s", e)
         raise HTTPException(status_code=500, detail=f"Pipeline error: {str(e)}")

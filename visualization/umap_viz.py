@@ -18,9 +18,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from neo4j import GraphDatabase
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config import PROCESSED_DIR
+from config import PROCESSED_DIR, NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +62,40 @@ def _load_metadata(case_ids: list[int]) -> pd.DataFrame:
     df["year"] = df["date_filed"].str[:4].fillna("unknown")
     log.info("  Metadata loaded: %d cases", len(df))
     return df
+
+
+def _load_primary_doctrines(case_ids: list[int]) -> dict[int, str]:
+    """
+    Return {case_id: primary_doctrine} for the given case_ids.
+    If no doctrine edges exist for a case, it maps to "No doctrine".
+    """
+    default = {int(cid): "No doctrine" for cid in case_ids}
+    if not case_ids:
+        return default
+
+    driver = None
+    try:
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+        with driver.session() as session:
+            rows = session.run(
+                """
+                MATCH (c:Case)-[:APPLIES_DOCTRINE]->(d:Doctrine)
+                WHERE c.id IN $ids
+                WITH c.id AS case_id, collect(DISTINCT d.name) AS doctrines
+                RETURN case_id, doctrines
+                """,
+                ids=[int(x) for x in case_ids],
+            ).data()
+        for row in rows:
+            doctrines = sorted([d for d in row.get("doctrines", []) if d])
+            default[int(row["case_id"])] = doctrines[0] if doctrines else "No doctrine"
+        return default
+    except Exception as e:
+        log.warning("Could not load doctrine labels for UMAP coloring: %s", e)
+        return default
+    finally:
+        if driver is not None:
+            driver.close()
 
 
 # ── Dimensionality reduction ──────────────────────────────────────────────────
@@ -127,6 +162,7 @@ def build_corpus_figure(color_by: str = "circuit"):
 
     matrix, case_ids = _load_embeddings()
     metadata         = _load_metadata(case_ids)
+    doctrine_map     = _load_primary_doctrines(case_ids)
     coords           = _run_umap(matrix)
 
     # Assemble plot dataframe
@@ -150,13 +186,14 @@ def build_corpus_figure(color_by: str = "circuit"):
             "court_id": court_id,
             "circuit":  _circuit_label(court_id),
             "year":     year,
+            "doctrine": doctrine_map.get(int(cid), "No doctrine"),
             "cite_count": cite_count,
             "hover": f"{name}<br>{_circuit_label(court_id)}, {year}<br>cite_count: {cite_count}",
         })
 
     df = pd.DataFrame(rows)
 
-    color_col = "circuit" if color_by == "circuit" else "year"
+    color_col = color_by if color_by in {"circuit", "year", "doctrine"} else "circuit"
 
     fig = px.scatter(
         df,
@@ -165,7 +202,7 @@ def build_corpus_figure(color_by: str = "circuit"):
         hover_name="name",
         hover_data={
             "x": False, "y": False,
-            "court_id": True, "year": True, "cite_count": True,
+            "court_id": True, "year": True, "doctrine": True, "cite_count": True,
         },
         title=f"Verit Corpus — UMAP Embedding Space (colored by {color_by})",
         labels={"x": "UMAP-1", "y": "UMAP-2"},
